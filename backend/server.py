@@ -4,6 +4,7 @@ HTTP backend: serves the frontend and a small JSON / Server-Sent Events API.
   GET    /                          frontend page
   GET    /api/status                {"token": bool}
   POST   /api/token                 {"token": "..."} -> validate with GitHub and save to .env
+  GET    /api/estimate?name=&location=  number of matching users + time estimate (no fetching)
   GET    /api/fetch?name=&location= live progress stream (text/event-stream)
   GET    /api/results               all saved records (JSON)
   GET    /api/results.csv|.txt|.xlsx   download saved records
@@ -83,6 +84,26 @@ class AppServer(ThreadingHTTPServer):
         self.token_validator = token_validator
         self.delay = delay
         self.fetch_lock = threading.Lock()   # one fetch at a time (protects rate limits)
+        self.runs: dict[int, threading.Event] = {}   # fetch id -> "please stop" flag
+        self.next_run_id = 1
+        self.runs_lock = threading.Lock()
+
+    def new_run(self) -> tuple[int, threading.Event]:
+        with self.runs_lock:
+            run_id, self.next_run_id = self.next_run_id, self.next_run_id + 1
+            self.runs[run_id] = threading.Event()
+            return run_id, self.runs[run_id]
+
+    def end_run(self, run_id: int) -> None:
+        with self.runs_lock:
+            self.runs.pop(run_id, None)
+
+    def stop_runs(self, run_id: int | None = None) -> None:
+        """Stop one fetch by id, or every running fetch when run_id is None."""
+        with self.runs_lock:
+            for rid, flag in self.runs.items():
+                if run_id is None or rid == run_id:
+                    flag.set()
 
     @property
     def has_token(self) -> bool:
@@ -130,24 +151,53 @@ class Handler(BaseHTTPRequestHandler):
             render, ctype = exporters.FORMATS[fmt]
             self._send(200, render(self._rows()), ctype,
                        {"Content-Disposition": f'attachment; filename="gmail_results.{fmt}"'})
+        elif url.path == "/api/estimate":
+            self._estimate(parse_qs(url.query))
         elif url.path == "/api/fetch":
             self._fetch(parse_qs(url.query))
         else:
             self._json({"error": "Not found"}, 404)
 
+    # ---------- estimate (count only, nothing is fetched or saved) ----------
+    def _estimate(self, qs: dict) -> None:
+        name = qs.get("name", [""])[0].strip()
+        location = qs.get("location", [""])[0].strip()
+        if not self.server.has_token:
+            return self._json({"error": "Please save your GitHub token first.", "code": "no_token"}, 400)
+        if not name:
+            return self._json({"error": "Please enter a name."}, 400)
+        try:
+            client = self.server.client_factory(self.server.token)
+            self._json(finder.estimate(name, location, client, delay=self.server.delay))
+        except finder.RateLimited as e:
+            self._json({"error": f"GitHub's search limit was reached. Please try again in "
+                                 f"{int(e.wait) + 1} seconds."}, 429)
+        except finder.GitHubAPIError as e:
+            self._json({"error": str(e), "code": e.code}, 502)
+
     def do_POST(self) -> None:
-        if urlparse(self.path).path != "/api/token":
+        path = urlparse(self.path).path
+        if path not in ("/api/token", "/api/stop"):
             return self._json({"error": "Not found"}, 404)
-        # Requiring JSON means other websites can't submit this form from a browser.
+        # Requiring JSON means other websites can't submit these requests from a browser.
         if not self.headers.get("Content-Type", "").startswith("application/json"):
             return self._json({"error": "Expected JSON."}, 415)
         length = int(self.headers.get("Content-Length") or 0)
         if length > 4096:
             return self._json({"error": "Request too large."}, 413)
         try:
-            token = str(json.loads(self.rfile.read(length) or b"{}").get("token", "")).strip()
-        except (ValueError, AttributeError):
+            body = json.loads(self.rfile.read(length) or b"{}")
+            if not isinstance(body, dict):
+                raise ValueError
+        except ValueError:
             return self._json({"error": "Invalid request."}, 400)
+
+        if path == "/api/stop":
+            run = body.get("run")
+            self.server.stop_runs(run if isinstance(run, int) else None)
+            return self._json({"stopped": True})
+
+        token = str(body.get("token", "")).strip()
 
         if not TOKEN_PATTERN.match(token):
             return self._json({"error": "That doesn't look like a GitHub token. "
@@ -196,15 +246,22 @@ class Handler(BaseHTTPRequestHandler):
         if not name:
             emit("fail", {"message": "Please enter a name."})
             return
-        if not self.server.fetch_lock.acquire(blocking=False):
-            emit("fail", {"message": "Another fetch is already running. Please wait for it to finish."})
+        # A new fetch replaces any earlier one that is still winding down (e.g. after Stop).
+        self.server.stop_runs()
+        if not self.server.fetch_lock.acquire(timeout=30):
+            emit("fail", {"message": "The previous fetch is still stopping. Please try again."})
             return
+        run_id, cancelled = self.server.new_run()
 
         store = finder.Store(self.server.db_path)
         try:
             client = self.server.client_factory(self.server.token)
             for ev in finder.iter_fetch(name, location, client, store,
                                         max_results=max_results, delay=self.server.delay):
+                if cancelled.is_set():
+                    break           # Stop was pressed, or a newer fetch started
+                if ev["type"] == "start":
+                    ev = {**ev, "run": run_id}      # lets the browser stop exactly this fetch
                 emit(ev["type"], ev)
         except (BrokenPipeError, ConnectionResetError):
             pass  # browser pressed Stop or closed the tab; results so far are saved
@@ -215,6 +272,7 @@ class Handler(BaseHTTPRequestHandler):
                 pass
         finally:
             store.close()
+            self.server.end_run(run_id)
             self.server.fetch_lock.release()
 
 

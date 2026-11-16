@@ -45,10 +45,13 @@
           <input id="location" name="location" type="text" placeholder="e.g. Tokyo">
         </div>
         <div class="actions">
-          <button type="submit" id="fetch-btn" class="btn primary">Fetch</button>
+          <button type="submit" id="estimate-btn" class="btn secondary">Estimate</button>
+          <button type="button" id="fetch-btn" class="btn primary" disabled>Fetch</button>
           <button type="button" id="stop-btn" class="btn secondary" hidden>Stop</button>
         </div>
       </form>
+
+      <p id="estimate" class="estimate" aria-live="polite"></p>
 
       <p id="token-status" class="token-status muted" hidden>
         <span class="ok-dot" aria-hidden="true"></span> GitHub token saved
@@ -90,7 +93,11 @@
           <tbody id="results"></tbody>
         </table>
       </div>
-      <p id="empty" class="empty muted">No addresses saved yet. Enter a name and area, then press Fetch.</p>
+      <nav id="pager" class="pager" aria-label="Pages" hidden>
+        <span id="pager-info" class="muted"></span>
+        <div id="pager-buttons" class="pager-buttons"></div>
+      </nav>
+      <p id="empty" class="empty muted">No addresses saved yet. Enter a name and area, press Estimate, then Fetch.</p>
     </section>
   </main>
 

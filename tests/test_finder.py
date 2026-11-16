@@ -40,6 +40,30 @@ class GmailTests(unittest.TestCase):
         self.assertFalse(finder.is_gmail("not-an-email"))
 
 
+class EstimateTests(unittest.TestCase):
+    def test_estimate_counts_without_fetching_profiles(self):
+        client = FakeClient()
+        result = finder.estimate("ABC", "XYZ", client)
+        self.assertEqual(result["total"], 4)
+        self.assertEqual(result["query"], "ABC in:name location:XYZ type:user")
+        self.assertGreaterEqual(result["seconds"], 0)
+        self.assertEqual(client.profile_calls, 0)        # no profile was opened
+
+    def test_estimate_seconds_within_quota(self):
+        # 100 profiles at 1s each + 1 search page
+        self.assertEqual(finder.estimate_seconds(100, 1.0, remaining=5000, reset_in=0), 101)
+
+    def test_estimate_seconds_waits_for_rate_limit(self):
+        # 10 left in this hour, reset in 30 min, then 90 more at 0.1s each
+        secs = finder.estimate_seconds(100, 0.1, remaining=10, reset_in=1800)
+        self.assertAlmostEqual(secs, 1800 + 90 * 0.1 + 1 * 0.1)
+
+    def test_estimate_seconds_multiple_hours(self):
+        # fast connection: 12,000 profiles need two full hourly windows after the first
+        secs = finder.estimate_seconds(12000, 0.1, remaining=0, reset_in=0, hourly=5000)
+        self.assertGreater(secs, 2 * 3600)
+
+
 class IterFetchTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

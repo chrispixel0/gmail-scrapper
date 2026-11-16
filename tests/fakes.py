@@ -52,6 +52,9 @@ class FakeClient:
         chunk = logins[(page - 1) * per_page: page * per_page]
         return {"total_count": len(logins), "items": [{"login": l} for l in chunk]}
 
+    def rate_limit(self):
+        return {"limit": 5000, "remaining": 5000, "reset": 0}
+
     def get_user(self, login):
         if self.rate_limit_once:
             self.rate_limit_once = False

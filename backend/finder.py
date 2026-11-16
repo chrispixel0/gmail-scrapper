@@ -33,6 +33,7 @@ GITHUB_EPOCH = datetime(2007, 10, 1, tzinfo=timezone.utc)   # before the first G
 GMAIL_DOMAINS = ("gmail.com", "googlemail.com")
 SHORT_WAIT = 3                          # rate-limit waits up to this are slept silently
 WAIT_TICK = 5                           # seconds between "wait" progress events
+HOURLY_LIMIT = 5000                     # GitHub API requests per hour with a token
 
 
 # --------------------------------------------------------------------------
@@ -160,6 +161,10 @@ class GitHubClient:
     def get_user(self, login: str) -> dict:
         return self._request(f"/users/{urllib.parse.quote(login)}")
 
+    def rate_limit(self) -> dict:
+        """Current core API quota: {"limit", "remaining", "reset"} (reset = epoch seconds)."""
+        return self._request("/rate_limit")["resources"]["core"]
+
 
 def validate_token(token: str) -> None:
     """Raise GitHubAPIError if GitHub does not accept the token."""
@@ -235,6 +240,45 @@ class Store:
 
     def close(self) -> None:
         self.conn.close()
+
+
+# --------------------------------------------------------------------------
+# Estimate (count results without fetching any profiles)
+# --------------------------------------------------------------------------
+
+def estimate_seconds(n: int, per_profile: float, remaining: int, reset_in: float,
+                     hourly: int = HOURLY_LIMIT) -> float:
+    """
+    Rough time to check n profiles at per_profile seconds each, including
+    pauses for GitHub's hourly limit and one search request per 100 users.
+    """
+    search_time = -(-n // SEARCH_PAGE_SIZE) * per_profile
+    if n <= remaining:
+        return n * per_profile + search_time
+    # Use the remaining quota, wait for the reset, then continue hour by hour.
+    elapsed = max(remaining * per_profile, reset_in)
+    full_hours, rest = divmod(n - remaining, hourly)
+    hour_time = max(3600.0, hourly * per_profile)
+    return elapsed + full_hours * hour_time + rest * per_profile + search_time
+
+
+def estimate(name: str, location: str | None, client, delay: float = 0.0) -> dict:
+    """Count matching users (one search request) and estimate how long fetching takes."""
+    query = build_query(name, location)
+    total = int(client.search_page(query, 1, 1).get("total_count", 0))
+
+    # Time one light request to measure this machine's speed to GitHub;
+    # it is about as fast as a profile request.
+    started = time.monotonic()
+    core = client.rate_limit()
+    per_profile = (time.monotonic() - started) + delay
+
+    seconds = estimate_seconds(
+        total, per_profile,
+        remaining=int(core.get("remaining", HOURLY_LIMIT)),
+        reset_in=max(0.0, float(core.get("reset", 0)) - time.time()),
+    )
+    return {"query": query, "total": total, "seconds": round(seconds)}
 
 
 # --------------------------------------------------------------------------

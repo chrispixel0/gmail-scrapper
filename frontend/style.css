@@ -131,6 +131,17 @@ input:disabled { opacity: 0.6; }
 .btn.danger { color: var(--danger); }
 .btn.danger:hover:not(:disabled) { background: var(--danger-soft); }
 
+/* ---------- estimate ---------- */
+.estimate { margin: 12px 0 0; font-size: 0.9rem; color: var(--muted); }
+.estimate.result {
+  color: var(--text);
+  background: var(--accent-soft);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+.estimate.result strong { color: var(--accent); }
+.estimate.empty-result { color: var(--danger); }
+
 /* ---------- status / progress ---------- */
 .error {
   margin: 16px 0 0;
@@ -185,6 +196,38 @@ tr.new td { background: var(--new-row); }
 td a { text-decoration: none; }
 td a:hover { text-decoration: underline; }
 .empty { text-align: center; padding: 24px 0 8px; margin: 0; }
+
+/* ---------- pagination ---------- */
+.pager {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 14px;
+  font-size: 0.88rem;
+}
+.pager-buttons { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.page-btn {
+  font: inherit;
+  min-width: 34px;
+  height: 34px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+}
+.page-btn:hover:not(:disabled) { background: var(--accent-soft); }
+.page-btn:disabled { opacity: 0.45; cursor: default; }
+.page-btn[aria-current="page"] {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-text);
+  font-weight: 600;
+}
+.page-gap { padding: 0 4px; color: var(--muted); }
 
 .sr-only {
   position: absolute;

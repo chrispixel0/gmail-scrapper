@@ -4,8 +4,9 @@ A web app that searches GitHub users by **name** and **area**. It collects the
 **Gmail** addresses those users have made public on their profiles, together
 with their avatars, and saves them to a database.
 
-Enter a name and an area, then click **Fetch**. The backend runs the same
-search you would type into GitHub's search box:
+Enter a name and an area, then click **Estimate** to see how many GitHub users
+match and how long fetching will take. Then click **Fetch**. The backend runs
+the same search you would type into GitHub's search box:
 
 ```
 ABC in:name location:XYZ type:user
@@ -16,12 +17,13 @@ browser while it runs.
 
 ## Features
 
-- Name and Area inputs, a **Fetch** button, and a **Stop** button
+- Name and Area inputs with **Estimate**, **Fetch** and **Stop** buttons
+- **Estimate first.** Clicking Estimate counts the matching users and estimates how long fetching will take, without fetching any addresses. **Fetch** stays disabled until you estimate, and it locks again if you change Name or Area or when a fetch finishes successfully. After **Stop** or an error you can click Fetch again
 - **Fetches every result.** GitHub's search returns at most 1,000 users, so larger searches are split by account creation date and combined (see [How "fetch all" works](#how-fetch-all-works))
 - **Waits through rate limits.** If GitHub's limit is reached, the app pauses, shows a countdown, and continues on its own
 - Live progress bar with the number of profiles checked, the number of Gmail addresses found, and the estimated time left
 - Keeps only `@gmail.com` and `@googlemail.com` addresses; all other emails are ignored
-- Results table with each user's **GitHub avatar**, name, profile link, area and Gmail address
+- Results table with each user's **GitHub avatar**, name, profile link, area and Gmail address, **20 rows per page**
 - Export to **CSV**, **TXT** (one address per line) or **XLSX** (Excel)
 - First-run setup screen for the **GitHub token**, so anyone who clones the project can paste their token in the browser
 - Saves results in SQLite, so they're still there after a restart and repeated searches don't create duplicates
@@ -75,6 +77,7 @@ gmail-scrapper/
  ──────────────────                  ──────────────                      ───────────────
  [Token] [Save] ──POST /api/token──▶ validate ─────────────────────────▶ /rate_limit
                                      save to .env
+ [Estimate] ──GET /api/estimate──▶ count only ─────────────────────────▶ /search/users (1 request)
  [Name] [Area] [Fetch] ─GET /api/fetch─▶ server.py ──▶ finder.py ──────▶ /search/users?q=...
                                             │              │              (split by created: date
    progress bar  ◀──── SSE events ──────────┘              │               if > 1000 results)
@@ -110,7 +113,9 @@ Keep the browser tab open; every address found is saved as soon as it's found.
 |---|---|---|
 | GET | `/api/status` | Report whether a GitHub token is saved: `{"token": true/false}` |
 | POST | `/api/token` | Check a token with GitHub and save it to `.env`. Body: `{"token": "..."}` |
+| GET | `/api/estimate?name=&location=` | Count matching users and estimate the fetch time, without fetching anything. Returns `{"query", "total", "seconds"}` |
 | GET | `/api/fetch?name=&location=` | Run a search. Streams `start`, `total`, `info`, `wait`, `checked`, `found`, `done` and `fail` events |
+| POST | `/api/stop` | Stop the running fetch. Body: `{"run": <id from the start event>}` |
 | GET | `/api/results` | List all saved records as JSON |
 | GET | `/api/results.csv` / `.txt` / `.xlsx` | Download all saved records |
 | DELETE | `/api/results` | Delete all saved records |
@@ -127,9 +132,10 @@ GITHUB_TOKEN=github_pat_... python3 -m backend.finder --name "John" --location "
 python3 -m unittest -v
 ```
 
-There are 33 tests. They cover building the search query, the Gmail filter,
-paging, search splitting, waiting through rate limits, the database upgrade,
-the three export formats, token setup, and every API endpoint. A fake GitHub
+There are 42 tests. They cover building the search query, the Gmail filter,
+the estimate and its time calculation, paging, search splitting, waiting
+through rate limits, stopping a fetch, the database upgrade, the three export
+formats, token setup, and every API endpoint. A fake GitHub
 client stands in for the real one, so the tests don't use the network.
 
 ## Responsible use

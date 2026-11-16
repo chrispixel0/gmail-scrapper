@@ -130,6 +130,28 @@ class ApiTests(ServerTestBase):
             self.get("/../backend/server.py")
         self.assertEqual(cm.exception.code, 404)
 
+    def get_error(self, path):
+        with self.assertRaises(urllib.error.HTTPError) as cm:
+            self.get(path)
+        return cm.exception.code, json.loads(cm.exception.read())
+
+    def test_estimate_returns_count_and_saves_nothing(self):
+        data = self.get_json("/api/estimate?name=ABC&location=XYZ")
+        self.assertEqual(data["total"], 4)
+        self.assertIn("seconds", data)
+        self.assertEqual(self.client.profile_calls, 0)
+        self.assertEqual(self.get_json("/api/results"), [])
+
+    def test_estimate_requires_name(self):
+        status, body = self.get_error("/api/estimate?name=&location=XYZ")
+        self.assertEqual(status, 400)
+        self.assertIn("name", body["error"])
+
+    def test_estimate_requires_token(self):
+        self.server.token = None
+        status, body = self.get_error("/api/estimate?name=ABC")
+        self.assertEqual((status, body["code"]), (400, "no_token"))
+
     def test_fetch_streams_progress_and_saves_all(self):
         events = self.fetch(name="ABC", location="XYZ")
         types = [t for t, _ in events]
@@ -140,6 +162,41 @@ class ApiTests(ServerTestBase):
         rows = self.get_json("/api/results")
         self.assertEqual(sorted(r["email"] for r in rows), ["Dave@GoogleMail.com", "alice@gmail.com"])
         self.assertTrue(all(r["avatar_url"] for r in rows))
+
+    def _open_stream(self):
+        """Start a fetch and return (connection, response, run id from the start event)."""
+        import http.client
+        conn = http.client.HTTPConnection("127.0.0.1", self.server.server_address[1], timeout=10)
+        conn.request("GET", "/api/fetch?name=ABC&location=XYZ")
+        resp = conn.getresponse()
+        while True:
+            line = resp.readline().decode()
+            if line.startswith("data: ") and '"start"' in line:
+                return conn, resp, json.loads(line[6:])["run"]
+
+    def _post_stop(self, run):
+        req = urllib.request.Request(self.base + "/api/stop", method="POST",
+                                     data=json.dumps({"run": run}).encode(),
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return json.loads(r.read())
+
+    def test_stop_ends_running_fetch_and_ignores_stale_ids(self):
+        self.server.delay = 0.3
+        conn, resp, run = self._open_stream()
+        self._post_stop(run - 1)                     # stale id: must not stop this fetch
+        self._post_stop(run)                         # correct id: stops it
+        rest = resp.read().decode()                  # stream closes once the fetch stops
+        conn.close()
+        self.assertNotIn("event: done", rest)
+        self.assertLess(self.client.profile_calls, 4)
+
+    def test_new_fetch_replaces_stopping_one(self):
+        self.server.delay = 0.3
+        conn, resp, _ = self._open_stream()
+        conn.close()                                 # browser pressed Stop without telling the server
+        events = self.fetch(name="ABC", location="XYZ")
+        self.assertEqual(events[-1][0], "done")
 
     def test_fetch_requires_name(self):
         events = self.fetch(name="  ", location="XYZ")
