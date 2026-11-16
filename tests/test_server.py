@@ -235,3 +235,124 @@ class ApiTests(ServerTestBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def fake_cred_validator(address, app_password):
+    if app_password == "wrongpassword0000":
+        from backend import mailer
+        raise mailer.MailError("Gmail rejected the App Password.", "bad_credentials")
+
+
+class SendTests(unittest.TestCase):
+    def setUp(self):
+        from tests.fakes import FakeSender
+        self.tmp = tempfile.TemporaryDirectory()
+        self.env_path = Path(self.tmp.name) / ".env"
+        self.sender = FakeSender()
+        self._saved = {k: os.environ.pop(k, None)
+                       for k in ("GITHUB_TOKEN", "GMAIL_ADDRESS", "GMAIL_APP_PASSWORD")}
+        self.server = make_server("127.0.0.1", 0, os.path.join(self.tmp.name, "r.db"),
+                                  env_path=self.env_path,
+                                  sender_factory=lambda a, p, n: self.sender,
+                                  cred_validator=fake_cred_validator, delay=0)
+        self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        for k, v in self._saved.items():
+            if v is not None:
+                os.environ[k] = v
+        self.tmp.cleanup()
+
+    def post(self, path, obj):
+        req = urllib.request.Request(self.base + path, method="POST",
+                                     data=json.dumps(obj).encode(),
+                                     headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=5) as r:
+                return r.status, json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read())
+
+    def get_json(self, path):
+        with urllib.request.urlopen(self.base + path, timeout=5) as r:
+            return json.loads(r.read())
+
+    def connect_gmail(self):
+        return self.post("/api/gmail", {"address": "me@gmail.com",
+                                        "app_password": "goodpassword0000", "sender_name": "Me"})
+
+    def send(self, recipients, **kw):
+        payload = {"recipients": recipients, "subject": "Hi", "body": "Body", "gap": 0}
+        payload.update(kw)
+        status, data = self.post("/api/send/start", payload)
+        self.assertEqual(status, 200, data)
+        with urllib.request.urlopen(self.base + f"/api/send/stream?job={data['job']}", timeout=10) as r:
+            return parse_sse(r.read().decode())
+
+    def test_gmail_not_configured_initially(self):
+        self.assertFalse(self.get_json("/api/gmail/status")["configured"])
+
+    def test_connect_gmail_saves_to_env_without_exposing_password(self):
+        status, data = self.connect_gmail()
+        self.assertEqual(status, 200)
+        self.assertEqual(data["address"], "me@gmail.com")
+        self.assertNotIn("password", json.dumps(data).lower())
+        from backend.server import read_env
+        self.assertEqual(read_env(self.env_path)["GMAIL_APP_PASSWORD"], "goodpassword0000")
+        self.assertTrue(self.get_json("/api/gmail/status")["configured"])
+
+    def test_bad_app_password_rejected(self):
+        status, data = self.post("/api/gmail", {"address": "me@gmail.com",
+                                                "app_password": "wrongpassword0000"})
+        self.assertEqual((status, data["code"]), (400, "bad_credentials"))
+
+    def test_send_requires_gmail(self):
+        status, data = self.post("/api/send/start",
+                                 {"recipients": ["a@gmail.com"], "subject": "Hi", "body": "B"})
+        self.assertEqual((status, data["code"]), (400, "gmail_not_set"))
+
+    def test_send_requires_subject_and_body(self):
+        self.connect_gmail()
+        status, data = self.post("/api/send/start", {"recipients": ["a@gmail.com"], "subject": "", "body": "B"})
+        self.assertEqual(status, 400)
+
+    def test_full_send_flow(self):
+        self.connect_gmail()
+        events = self.send(["a@gmail.com", "b@gmail.com"])
+        types = [t for t, _ in events]
+        self.assertEqual(types[0], "start")
+        self.assertEqual(types[-1], "done")
+        self.assertEqual(types.count("sent"), 2)
+        self.assertEqual(self.sender.sent, ["a@gmail.com", "b@gmail.com"])
+        self.assertEqual(self.get_json("/api/gmail/status")["sent_total"], 2)
+
+    def test_second_send_skips_already_sent(self):
+        self.connect_gmail()
+        self.send(["a@gmail.com", "b@gmail.com"])
+        self.sender.sent.clear()
+        events = self.send(["a@gmail.com", "b@gmail.com", "c@gmail.com"])
+        self.assertEqual(self.sender.sent, ["c@gmail.com"])          # only the new one
+        self.assertEqual(sum(1 for t, _ in events if t == "skipped"), 2)
+
+    def test_daily_cap_enforced(self):
+        self.connect_gmail()
+        events = self.send([f"u{i}@gmail.com" for i in range(5)], cap=2)
+        self.assertEqual(len(self.sender.sent), 2)
+        self.assertTrue(any(t == "limit" for t, _ in events))
+
+    def test_cap_over_500_is_clamped(self):
+        self.connect_gmail()
+        events = self.send([f"u{i}@gmail.com" for i in range(3)], cap=99999)
+        start = next(d for t, d in events if t == "start")
+        self.assertEqual(start["cap"], 500)
+
+    def test_reset_sent_history(self):
+        self.connect_gmail()
+        self.send(["a@gmail.com"])
+        req = urllib.request.Request(self.base + "/api/sent", method="DELETE")
+        with urllib.request.urlopen(req, timeout=5) as r:
+            self.assertEqual(json.loads(r.read())["deleted"], 1)
+        self.assertEqual(self.get_json("/api/gmail/status")["sent_total"], 0)

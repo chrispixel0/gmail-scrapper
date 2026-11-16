@@ -9,6 +9,13 @@ HTTP backend: serves the frontend and a small JSON / Server-Sent Events API.
   GET    /api/results               all saved records (JSON)
   GET    /api/results.csv|.txt|.xlsx   download saved records
   DELETE /api/results               delete all saved records
+
+  GET    /api/gmail/status          Gmail connection + sent counts (never the password)
+  POST   /api/gmail                 {address, app_password, sender_name} -> verify + save to .env
+  POST   /api/send/start            {recipients[], subject, body, gap, cap, add_unsub} -> {job}
+  GET    /api/send/stream?job=      live send progress (text/event-stream)
+  POST   /api/send/stop             {job} -> stop the running send
+  DELETE /api/sent                  reset the "already sent" history
 """
 
 from __future__ import annotations
@@ -22,7 +29,7 @@ from pathlib import Path
 from typing import Callable
 from urllib.parse import parse_qs, urlparse
 
-from . import exporters, finder
+from . import exporters, finder, mailer
 
 ROOT = Path(__file__).resolve().parent.parent
 FRONTEND_DIR = ROOT / "frontend"
@@ -44,26 +51,40 @@ TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9_]{20,255}$")
 # Token storage (.env file in the project folder)
 # --------------------------------------------------------------------------
 
-def read_env_token(path: Path) -> str | None:
-    if not path.is_file():
-        return None
-    for line in path.read_text(encoding="utf-8").splitlines():
-        key, sep, value = line.strip().partition("=")
-        if sep and key.strip() == "GITHUB_TOKEN":
-            return value.strip().strip('"').strip("'") or None
-    return None
+def read_env(path: Path) -> dict[str, str]:
+    """Read KEY=VALUE lines from a .env file into a dict."""
+    values: dict[str, str] = {}
+    if path.is_file():
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                key, sep, value = line.partition("=")
+                if sep:
+                    values[key.strip()] = value.strip().strip('"').strip("'")
+    return values
 
 
-def save_env_token(path: Path, token: str) -> None:
-    """Write GITHUB_TOKEN to .env, keeping any other lines in the file."""
-    lines = path.read_text(encoding="utf-8").splitlines() if path.is_file() else []
-    lines = [l for l in lines if l.strip().partition("=")[0].strip() != "GITHUB_TOKEN"]
-    lines.append(f"GITHUB_TOKEN={token}")
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+def save_env_values(path: Path, updates: dict[str, str | None]) -> None:
+    """Add/replace keys in .env (a value of None removes the key), keeping the rest."""
+    values = read_env(path)
+    for key, value in updates.items():
+        if value is None:
+            values.pop(key, None)
+        else:
+            values[key] = value
+    path.write_text("".join(f"{k}={v}\n" for k, v in values.items()), encoding="utf-8")
     try:
         os.chmod(path, 0o600)   # readable only by the current user (no-op on Windows)
     except OSError:
         pass
+
+
+def read_env_token(path: Path) -> str | None:
+    return read_env(path).get("GITHUB_TOKEN") or None
+
+
+def save_env_token(path: Path, token: str) -> None:
+    save_env_values(path, {"GITHUB_TOKEN": token})
 
 
 # --------------------------------------------------------------------------
@@ -75,7 +96,10 @@ class AppServer(ThreadingHTTPServer):
 
     def __init__(self, address, db_path: str, env_path: Path, token: str | None,
                  client_factory: Callable[[str | None], object],
-                 token_validator: Callable[[str], None], delay: float):
+                 token_validator: Callable[[str], None], delay: float,
+                 gmail: dict | None = None,
+                 sender_factory: Callable[[str, str, str], object] | None = None,
+                 cred_validator: Callable[[str, str], None] | None = None):
         super().__init__(address, Handler)
         self.db_path = db_path
         self.env_path = env_path
@@ -87,6 +111,15 @@ class AppServer(ThreadingHTTPServer):
         self.runs: dict[int, threading.Event] = {}   # fetch id -> "please stop" flag
         self.next_run_id = 1
         self.runs_lock = threading.Lock()
+
+        # Gmail sending.
+        self.gmail = gmail or {}             # {"address", "app_password", "sender_name"}
+        self.sender_factory = sender_factory or (lambda a, p, n: mailer.GmailSender(a, p, n))
+        self.cred_validator = cred_validator or mailer.validate_credentials
+        self.send_lock = threading.Lock()    # one send run at a time
+        self.send_jobs: dict[int, dict] = {} # job id -> {"cancel", "params"}
+        self.next_job_id = 1
+        self.jobs_lock = threading.Lock()
 
     def new_run(self) -> tuple[int, threading.Event]:
         with self.runs_lock:
@@ -108,6 +141,35 @@ class AppServer(ThreadingHTTPServer):
     @property
     def has_token(self) -> bool:
         return bool(self.token)
+
+    @property
+    def has_gmail(self) -> bool:
+        return bool(self.gmail.get("address") and self.gmail.get("app_password"))
+
+    # ----- send jobs -----
+    def new_send_job(self, params: dict) -> int:
+        with self.jobs_lock:
+            job_id, self.next_job_id = self.next_job_id, self.next_job_id + 1
+            self.send_jobs[job_id] = {"cancel": threading.Event(), "params": params}
+            return job_id
+
+    def get_send_job(self, job_id: int) -> dict | None:
+        with self.jobs_lock:
+            return self.send_jobs.get(job_id)
+
+    def end_send_job(self, job_id: int) -> None:
+        with self.jobs_lock:
+            self.send_jobs.pop(job_id, None)
+
+    def stop_sends(self, job_id: int | None = None, keep: int | None = None) -> None:
+        """Stop one send (job_id), or every send except `keep`."""
+        with self.jobs_lock:
+            for jid, job in self.send_jobs.items():
+                if job_id is not None:
+                    if jid == job_id:
+                        job["cancel"].set()
+                elif jid != keep:
+                    job["cancel"].set()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -155,8 +217,31 @@ class Handler(BaseHTTPRequestHandler):
             self._estimate(parse_qs(url.query))
         elif url.path == "/api/fetch":
             self._fetch(parse_qs(url.query))
+        elif url.path == "/api/gmail/status":
+            self._json(self._gmail_status())
+        elif url.path == "/api/send/stream":
+            self._send_stream(parse_qs(url.query))
         else:
             self._json({"error": "Not found"}, 404)
+
+    # ---------- gmail status (never returns the password) ----------
+    def _gmail_status(self) -> dict:
+        store = mailer.SentStore(self.server.db_path)
+        try:
+            from datetime import date
+            sent_today = store.count_sent_on(date.today().isoformat())
+            sent_total = store.total()
+        finally:
+            store.close()
+        return {
+            "configured": self.server.has_gmail,
+            "address": self.server.gmail.get("address", ""),
+            "sender_name": self.server.gmail.get("sender_name", ""),
+            "sent_today": sent_today,
+            "sent_total": sent_total,
+            "cap_default": mailer.DEFAULT_DAILY_CAP,
+            "cap_max": mailer.MAX_DAILY_CAP,
+        }
 
     # ---------- estimate (count only, nothing is fetched or saved) ----------
     def _estimate(self, qs: dict) -> None:
@@ -175,15 +260,24 @@ class Handler(BaseHTTPRequestHandler):
         except finder.GitHubAPIError as e:
             self._json({"error": str(e), "code": e.code}, 502)
 
+    # Max JSON body per POST route. /api/send/start carries the recipient list.
+    POST_LIMITS = {
+        "/api/token": 4096,
+        "/api/stop": 4096,
+        "/api/gmail": 8192,
+        "/api/send/start": 4_000_000,
+        "/api/send/stop": 4096,
+    }
+
     def do_POST(self) -> None:
         path = urlparse(self.path).path
-        if path not in ("/api/token", "/api/stop"):
+        if path not in self.POST_LIMITS:
             return self._json({"error": "Not found"}, 404)
         # Requiring JSON means other websites can't submit these requests from a browser.
         if not self.headers.get("Content-Type", "").startswith("application/json"):
             return self._json({"error": "Expected JSON."}, 415)
         length = int(self.headers.get("Content-Length") or 0)
-        if length > 4096:
+        if length > self.POST_LIMITS[path]:
             return self._json({"error": "Request too large."}, 413)
         try:
             body = json.loads(self.rfile.read(length) or b"{}")
@@ -196,9 +290,17 @@ class Handler(BaseHTTPRequestHandler):
             run = body.get("run")
             self.server.stop_runs(run if isinstance(run, int) else None)
             return self._json({"stopped": True})
+        if path == "/api/gmail":
+            return self._save_gmail(body)
+        if path == "/api/send/start":
+            return self._send_start(body)
+        if path == "/api/send/stop":
+            job = body.get("job")
+            self.server.stop_sends(job if isinstance(job, int) else None)
+            return self._json({"stopped": True})
 
+        # path == "/api/token"
         token = str(body.get("token", "")).strip()
-
         if not TOKEN_PATTERN.match(token):
             return self._json({"error": "That doesn't look like a GitHub token. "
                                         "It usually starts with github_pat_ or ghp_."}, 400)
@@ -206,19 +308,49 @@ class Handler(BaseHTTPRequestHandler):
             self.server.token_validator(token)
         except finder.GitHubAPIError as e:
             return self._json({"error": str(e)}, 400)
-
         save_env_token(self.server.env_path, token)
         self.server.token = token
         self._json({"token": True})
 
-    def do_DELETE(self) -> None:
-        if urlparse(self.path).path != "/api/results":
-            return self._json({"error": "Not found"}, 404)
-        store = finder.Store(self.server.db_path)
+    # ---------- save Gmail credentials ----------
+    def _save_gmail(self, body: dict) -> None:
+        address = str(body.get("address", "")).strip()
+        app_password = str(body.get("app_password", "")).strip().replace(" ", "")
+        sender_name = str(body.get("sender_name", "")).strip()[:120]
+        if not mailer.is_valid_email(address):
+            return self._json({"error": "Please enter a valid Gmail address."}, 400)
+        if len(app_password) < 12:
+            return self._json({"error": "Please paste the 16-character App Password."}, 400)
         try:
-            self._json({"deleted": store.clear()})
-        finally:
-            store.close()
+            self.server.cred_validator(address, app_password)
+        except mailer.MailError as e:
+            return self._json({"error": str(e), "code": e.code}, 400)
+
+        self.server.gmail = {"address": address, "app_password": app_password,
+                             "sender_name": sender_name}
+        save_env_values(self.server.env_path, {
+            "GMAIL_ADDRESS": address,
+            "GMAIL_APP_PASSWORD": app_password,
+            "GMAIL_SENDER_NAME": sender_name,
+        })
+        self._json({"configured": True, "address": address, "sender_name": sender_name})
+
+    def do_DELETE(self) -> None:
+        path = urlparse(self.path).path
+        if path == "/api/results":
+            store = finder.Store(self.server.db_path)
+            try:
+                self._json({"deleted": store.clear()})
+            finally:
+                store.close()
+        elif path == "/api/sent":
+            store = mailer.SentStore(self.server.db_path)
+            try:
+                self._json({"deleted": store.clear()})
+            finally:
+                store.close()
+        else:
+            self._json({"error": "Not found"}, 404)
 
     # ---------- live fetch (Server-Sent Events) ----------
     def _fetch(self, qs: dict) -> None:
@@ -275,14 +407,104 @@ class Handler(BaseHTTPRequestHandler):
             self.server.end_run(run_id)
             self.server.fetch_lock.release()
 
+    # ---------- start a send (stores the job, returns its id) ----------
+    def _send_start(self, body: dict) -> None:
+        if not self.server.has_gmail:
+            return self._json({"error": "Please connect your Gmail account first.",
+                               "code": "gmail_not_set"}, 400)
+
+        raw = body.get("recipients")
+        if not isinstance(raw, list):
+            return self._json({"error": "No recipient list was uploaded."}, 400)
+        recipients = mailer.parse_recipients("\n".join(r for r in raw if isinstance(r, str)))
+        if not recipients:
+            return self._json({"error": "The uploaded file has no email addresses."}, 400)
+        if len(recipients) > 20000:
+            return self._json({"error": "That list is too large (over 20,000 addresses)."}, 400)
+
+        subject = str(body.get("subject", "")).strip()
+        content = str(body.get("body", ""))
+        if not subject:
+            return self._json({"error": "Please enter a subject."}, 400)
+        if not content.strip():
+            return self._json({"error": "Please enter the email content."}, 400)
+
+        try:
+            gap = max(0.0, min(3600.0, float(body.get("gap", 30))))
+        except (TypeError, ValueError):
+            gap = 30.0
+        cap = mailer.clamp_cap(body.get("cap"))
+        add_unsub = bool(body.get("add_unsub"))
+
+        job_id = self.server.new_send_job({
+            "recipients": recipients, "subject": subject, "body": content,
+            "gap": gap, "cap": cap, "add_unsub": add_unsub,
+        })
+        self._json({"job": job_id, "count": len(recipients)})
+
+    # ---------- run a send (Server-Sent Events) ----------
+    def _send_stream(self, qs: dict) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+
+        def emit(event: str, data: dict) -> None:
+            self.wfile.write(f"event: {event}\ndata: {json.dumps(data)}\n\n".encode("utf-8"))
+            self.wfile.flush()
+
+        try:
+            job_id = int(qs.get("job", ["0"])[0])
+        except ValueError:
+            job_id = 0
+        job = self.server.get_send_job(job_id)
+        if job is None:
+            return emit("fail", {"message": "This send has expired. Please click Send again."})
+
+        self.server.stop_sends(keep=job_id)          # replace any send still winding down
+        if not self.server.send_lock.acquire(timeout=30):
+            return emit("fail", {"message": "A previous send is still stopping. Please try again."})
+
+        params, cancel = job["params"], job["cancel"]
+        g = self.server.gmail
+        sender = self.server.sender_factory(g["address"], g["app_password"], g.get("sender_name", ""))
+        store = mailer.SentStore(self.server.db_path)
+        try:
+            for ev in mailer.iter_send(sender=sender, store=store, cancel=cancel, **params):
+                if ev["type"] == "start":
+                    ev = {**ev, "job": job_id}
+                emit(ev["type"], ev)
+        except (BrokenPipeError, ConnectionResetError):
+            pass                                     # tab closed; what was sent is recorded
+        except mailer.MailError as e:
+            try:
+                emit("fail", {"message": str(e), "code": e.code})
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+        finally:
+            store.close()
+            self.server.end_send_job(job_id)
+            self.server.send_lock.release()
+
 
 def make_server(host: str = "127.0.0.1", port: int = 8765, db_path: str | None = None,
                 env_path: Path | None = None,
                 client_factory: Callable[[str | None], object] | None = None,
                 token_validator: Callable[[str], None] | None = None,
-                delay: float = 0.1) -> AppServer:
+                delay: float = 0.1,
+                sender_factory: Callable[[str, str, str], object] | None = None,
+                cred_validator: Callable[[str, str], None] | None = None) -> AppServer:
     env_path = Path(env_path or DEFAULT_ENV)
-    token = os.environ.get("GITHUB_TOKEN") or read_env_token(env_path)
+    env = read_env(env_path)
+    token = os.environ.get("GITHUB_TOKEN") or env.get("GITHUB_TOKEN") or None
+
+    gmail = {}
+    address = os.environ.get("GMAIL_ADDRESS") or env.get("GMAIL_ADDRESS")
+    password = os.environ.get("GMAIL_APP_PASSWORD") or env.get("GMAIL_APP_PASSWORD")
+    if address and password:
+        gmail = {"address": address, "app_password": password,
+                 "sender_name": os.environ.get("GMAIL_SENDER_NAME") or env.get("GMAIL_SENDER_NAME", "")}
+
     return AppServer(
         (host, port),
         db_path=str(db_path or DEFAULT_DB),
@@ -291,4 +513,7 @@ def make_server(host: str = "127.0.0.1", port: int = 8765, db_path: str | None =
         client_factory=client_factory or (lambda t: finder.GitHubClient(token=t)),
         token_validator=token_validator or finder.validate_token,
         delay=delay,
+        gmail=gmail,
+        sender_factory=sender_factory,
+        cred_validator=cred_validator,
     )

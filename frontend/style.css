@@ -237,5 +237,60 @@ td a:hover { text-decoration: underline; }
   white-space: nowrap;
 }
 
+/* ---------- send emails ---------- */
+.send-sub { font-size: 0.85rem; }
+.gmail-intro { margin: 0 0 12px; }
+.gmail-form {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr auto;
+  gap: 12px;
+  align-items: end;
+}
+#gmail-box { border-bottom: 1px solid var(--border); padding-bottom: 16px; margin-bottom: 16px; }
+#compose .field { margin-bottom: 14px; }
+.file-field input[type="file"] { padding: 7px; }
+#recipients-info { display: block; margin-top: 4px; font-size: 0.85rem; }
+textarea {
+  font: inherit;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 9px 11px;
+  width: 100%;
+  resize: vertical;
+}
+textarea:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+.send-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  align-items: end;
+  margin-bottom: 14px;
+}
+.field-small { width: 140px; }
+.checkbox-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.9rem;
+  padding-bottom: 9px;
+  cursor: pointer;
+}
+.checkbox-field input { width: auto; }
+.send-actions { align-items: center; gap: 12px; }
+#sent-counter { font-size: 0.85rem; }
+.send-log-wrap { margin-top: 12px; font-size: 0.85rem; }
+.send-log-wrap summary { cursor: pointer; color: var(--muted); }
+.send-log { margin: 8px 0 0; padding-left: 18px; max-height: 200px; overflow-y: auto; }
+.send-log li { margin: 2px 0; }
+.send-log .sent { color: var(--ok); }
+.send-log .skip { color: var(--muted); }
+.send-log .fail { color: var(--danger); }
+
+@media (max-width: 720px) {
+  .gmail-form { grid-template-columns: 1fr; }
+}
+
 .page-footer { font-size: 0.82rem; padding-bottom: 32px; }
 code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 0.9em; }

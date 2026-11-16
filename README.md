@@ -25,6 +25,7 @@ browser while it runs.
 - Keeps only `@gmail.com` and `@googlemail.com` addresses; all other emails are ignored
 - Results table with each user's **GitHub avatar**, name, profile link, area and Gmail address, **20 rows per page**
 - Export to **CSV**, **TXT** (one address per line) or **XLSX** (Excel)
+- **Send emails** from your own Gmail account to an uploaded list of people who opted in — with a title, content, a time gap between emails, a daily limit, automatic resume, and permanent de-duplication (see [Sending emails](#sending-emails))
 - First-run setup screen for the **GitHub token**, so anyone who clones the project can paste their token in the browser
 - Saves results in SQLite, so they're still there after a restart and repeated searches don't create duplicates
 - Light and dark mode, and works on mobile
@@ -60,6 +61,7 @@ gmail-scrapper/
 ├── backend/
 │   ├── finder.py        # GitHub API client, search splitting, rate-limit handling, Gmail filter, SQLite store
 │   ├── exporters.py     # CSV / TXT / XLSX export (XLSX written with the standard library)
+│   ├── mailer.py       # Gmail SMTP sending, daily cap, permanent de-duplication
 │   └── server.py        # HTTP server: serves the frontend and the REST/SSE API, saves the token
 ├── frontend/
 │   ├── index.html       # UI layout
@@ -119,6 +121,12 @@ Keep the browser tab open; every address found is saved as soon as it's found.
 | GET | `/api/results` | List all saved records as JSON |
 | GET | `/api/results.csv` / `.txt` / `.xlsx` | Download all saved records |
 | DELETE | `/api/results` | Delete all saved records |
+| GET | `/api/gmail/status` | Gmail connection state and sent counts (never the password) |
+| POST | `/api/gmail` | Verify Gmail address + App Password and save them to `.env` |
+| POST | `/api/send/start` | Validate a send and queue it. Body: `{recipients[], subject, body, gap, cap, add_unsub}` -> `{job}` |
+| GET | `/api/send/stream?job=` | Run the send. Streams `start`, `sent`, `skipped`, `error`, `limit`, `done`, `fail` events |
+| POST | `/api/send/stop` | Stop the running send. Body: `{job}` |
+| DELETE | `/api/sent` | Reset the "already sent" history |
 
 ## Command-line use (optional)
 
@@ -132,11 +140,44 @@ GITHUB_TOKEN=github_pat_... python3 -m backend.finder --name "John" --location "
 python3 -m unittest -v
 ```
 
-There are 42 tests. They cover building the search query, the Gmail filter,
+There are 64 tests. They cover building the search query, the Gmail filter,
 the estimate and its time calculation, paging, search splitting, waiting
-through rate limits, stopping a fetch, the database upgrade, the three export
-formats, token setup, and every API endpoint. A fake GitHub
+through rate limits, stopping a fetch, the database upgrade, the three export formats, token
+setup, Gmail credential checks, sending with de-duplication and the daily cap,
+stop/resume, and every API endpoint. A fake GitHub
 client stands in for the real one, so the tests don't use the network.
+
+## Sending emails
+
+The **Send emails** card lets you email a list of people **from your own Gmail
+account**. Use it only for recipients who agreed to hear from you — never the
+addresses collected from GitHub, which would be spam and would break GitHub's
+and Gmail's rules.
+
+**Setup (once):** connect your Gmail account in the card. You need a Gmail
+**App Password**:
+
+1. Turn on **2-Step Verification** at <https://myaccount.google.com/security>.
+2. Create an App Password at <https://myaccount.google.com/apppasswords> and copy the 16 characters.
+3. Enter your Gmail address, that App Password, and a sender name, then click **Connect**.
+
+The app checks the credentials with Gmail and saves them to `.env` (gitignored,
+never uploaded), so you only do this once until you change accounts.
+
+**Each send:**
+
+1. Upload a **TXT file** of recipient addresses (the project's TXT export has the right format).
+2. Enter a **Title** and **Content**.
+3. Set the **Time gap** between emails and the **Daily limit** (default 200, maximum 500).
+4. Optionally tick **Add unsubscribe line** to append a sender identity and opt-out note to each email.
+5. Click **Send**. Progress shows live, and **Stop** halts it at any time.
+
+**Safety rules built in:**
+
+- **Permanent de-duplication.** Every address ever emailed is remembered and is never emailed again, on any later run. This also means that if you Stop partway and click Send again, it automatically continues with the addresses it hasn't reached yet. (A **Reset sent history** is available via `DELETE /api/sent` if you ever need to start over.)
+- **Daily limit counted across restarts.** The count is stored per calendar day, so closing the app cannot reset it and let you exceed the limit.
+- **The App Password can send mail as you.** It is kept only on your computer and never committed. Treat it like a password.
+- A per-recipient failure (a bounced or mistyped address) is skipped and logged; it does not stop the batch.
 
 ## Responsible use
 

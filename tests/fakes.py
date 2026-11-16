@@ -1,6 +1,7 @@
 import re
 from datetime import datetime, timezone
 
+from backend import mailer
 from backend.finder import GitHubAPIError, RateLimited
 
 PROFILES = {
@@ -63,3 +64,32 @@ class FakeClient:
             raise GitHubAPIError("GitHub rejected the token. Please enter a valid token.", "bad_token")
         self.profile_calls += 1
         return self.users[login]
+
+
+class FakeSender:
+    """Stands in for mailer.GmailSender so tests never open an SMTP connection."""
+
+    def __init__(self, address="me@gmail.com", app_password="apppasswordxxxx", sender_name=""):
+        self.address = address
+        self.sender_name = sender_name
+        self.sent = []                 # addresses successfully "sent" to
+        self.fail_addresses = set()    # raise a per-recipient error for these
+        self.auth_error = False        # raise a whole-batch auth error
+        self.stop_after = None         # set the cancel event after N sends (for resume tests)
+        self._cancel = None
+
+    def bind_cancel(self, cancel):
+        self._cancel = cancel
+        return self
+
+    def send(self, to, subject, body, add_unsub):
+        if self.auth_error:
+            raise mailer.MailError("Gmail rejected the App Password.", "bad_credentials")
+        if to in self.fail_addresses:
+            raise mailer.MailError(f"Gmail refused this address: {to}", "bad_recipient")
+        self.sent.append(to)
+        if self.stop_after is not None and self._cancel is not None and len(self.sent) >= self.stop_after:
+            self._cancel.set()
+
+    def close(self):
+        pass
