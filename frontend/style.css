@@ -157,6 +157,8 @@ input:disabled { opacity: 0.6; }
 .bar-fill.indeterminate { width: 30%; animation: slide 1.1s ease-in-out infinite; }
 @keyframes slide { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
 .status { margin: 8px 0 0; font-size: 0.9rem; }
+.area-form { grid-template-columns: 1fr auto; }
+#status { margin-top: 14px; }
 .info { margin: 4px 0 0; font-size: 0.85rem; }
 
 /* ---------- results ---------- */

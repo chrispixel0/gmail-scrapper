@@ -75,7 +75,7 @@ class ServerTestBase(unittest.TestCase):
 
 class TokenTests(ServerTestBase):
     def test_no_token_initially(self):
-        self.assertEqual(self.get_json("/api/status"), {"token": False})
+        self.assertEqual(self.get_json("/api/status"), {"token": False, "checked": 0})
 
     def test_fetch_refused_without_token(self):
         events = self.fetch(name="ABC", location="XYZ")
@@ -86,7 +86,7 @@ class TokenTests(ServerTestBase):
         self.env_path.write_text("OTHER=1\nGITHUB_TOKEN=old_value_xxxxxxxxxxxxxxx\n")
         status, body = self.post_token(GOOD_TOKEN)
         self.assertEqual((status, body), (200, {"token": True}))
-        self.assertEqual(self.get_json("/api/status"), {"token": True})
+        self.assertTrue(self.get_json("/api/status")["token"])
         self.assertEqual(read_env_token(self.env_path), GOOD_TOKEN)
         self.assertIn("OTHER=1", self.env_path.read_text())        # other settings kept
         self.assertEqual(self.env_path.read_text().count("GITHUB_TOKEN="), 1)
@@ -198,9 +198,33 @@ class ApiTests(ServerTestBase):
         events = self.fetch(name="ABC", location="XYZ")
         self.assertEqual(events[-1][0], "done")
 
-    def test_fetch_requires_name(self):
-        events = self.fetch(name="  ", location="XYZ")
-        self.assertEqual(events, [("fail", {"message": "Please enter a name."})])
+    def test_fetch_requires_area(self):
+        events = self.fetch(name="", location="  ")
+        self.assertEqual(events, [("fail", {"message": "Please enter an area."})])
+
+    def test_area_only_fetch(self):
+        events = self.fetch(location="XYZ")
+        self.assertEqual(self.client.queries[0], "location:XYZ type:user")
+        self.assertEqual(events[-1][0], "done")
+        self.assertEqual(events[-1][1]["checked"], 4)
+
+    def test_second_fetch_skips_already_checked(self):
+        self.fetch(location="XYZ")
+        calls_after_first = self.client.profile_calls
+        events = self.fetch(location="XYZ")
+        done = events[-1][1]
+        self.assertEqual((done["checked"], done["skipped"]), (0, 4))
+        self.assertEqual(self.client.profile_calls, calls_after_first)   # no profile re-opened
+        self.assertEqual(self.get_json("/api/status")["checked"], 4)
+
+    def test_forget_checked_history(self):
+        self.fetch(location="XYZ")
+        req = urllib.request.Request(self.base + "/api/checked", method="DELETE")
+        with urllib.request.urlopen(req, timeout=5) as r:
+            self.assertEqual(json.loads(r.read()), {"deleted": 4})
+        events = self.fetch(location="XYZ")
+        self.assertEqual(events[-1][1]["checked"], 4)                    # checked again
+        self.assertEqual(len(self.get_json("/api/results")), 2)          # saved addresses kept
 
     def test_fetch_reports_api_error_and_keeps_partial_results(self):
         self.client.fail_after = 1

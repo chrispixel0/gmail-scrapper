@@ -15,18 +15,15 @@ const els = {
   tokenChange: $("token-change"),
   // search
   form: $("fetch-form"),
-  name: $("name"),
   location: $("location"),
-  estimateBtn: $("estimate-btn"),
   fetchBtn: $("fetch-btn"),
   stopBtn: $("stop-btn"),
-  estimate: $("estimate"),
-  progress: $("progress"),
-  query: $("query"),
-  barFill: $("bar-fill"),
   status: $("status"),
   info: $("info"),
   error: $("error"),
+  checkedStatus: $("checked-status"),
+  checkedCount: $("checked-count"),
+  checkedForget: $("checked-forget"),
   // results
   results: $("results"),
   empty: $("empty"),
@@ -41,10 +38,11 @@ const state = {
   hasToken: false,
   changingToken: false,
   busy: false,            // a fetch is running
-  estimating: false,      // an estimate request is running
-  estimate: null,         // {name, location, total, seconds} for the last successful estimate
+  checkedTotal: 0,        // profiles remembered as already checked
   foundThisRun: 0,
-  startedAt: 0,
+  checkedThisRun: 0,
+  skippedThisRun: 0,
+  total: 0,               // users GitHub found for the current search
   runId: null,            // server id of the running fetch (used by Stop)
   page: 1,
 };
@@ -53,16 +51,6 @@ const fresh = new Set();     // logins found in the current fetch (highlighted)
 let source = null;           // active EventSource
 
 // ---------- helpers ----------
-
-function inputs() {
-  return { name: els.name.value.trim(), location: els.location.value.trim() };
-}
-
-/** True when the last estimate was made for exactly the current Name and Area. */
-function estimateMatchesInputs() {
-  const { name, location } = inputs();
-  return !!state.estimate && state.estimate.name === name && state.estimate.location === location;
-}
 
 function safeUrl(url, fallback) {
   return typeof url === "string" && url.startsWith("https://") ? url : fallback;
@@ -81,15 +69,6 @@ function formatDuration(seconds) {
   if (h) return `${h}h ${m}m`;
   if (m) return `${m}m ${String(s).padStart(2, "0")}s`;
   return `${s}s`;
-}
-
-function roughDuration(seconds) {
-  if (seconds < 60) return "less than a minute";
-  const minutes = Math.round(seconds / 60);
-  if (minutes < 60) return `about ${minutes} minute${minutes === 1 ? "" : "s"}`;
-  const h = Math.floor(minutes / 60);
-  const m = minutes % 60;
-  return `about ${h} hour${h === 1 ? "" : "s"}` + (m ? ` ${m} min` : "");
 }
 
 function showError(el, message) {
@@ -217,37 +196,12 @@ function renderTable() {
   renderPager(rows.length, pages, start, pageRows.length);
 }
 
-// ---------- rendering: controls + estimate ----------
+// ---------- rendering: controls + status ----------
 
-function renderEstimate() {
-  const el = els.estimate;
-  el.className = "estimate";
-  el.replaceChildren();
-
-  if (!state.hasToken) return;
-  if (state.estimating) {
-    el.textContent = "Counting matching GitHub users…";
-    return;
-  }
-  if (!estimateMatchesInputs()) {
-    el.textContent = "Click Estimate to see how many GitHub users match. Fetch unlocks after that.";
-    return;
-  }
-
-  const { name, location, total, seconds } = state.estimate;
-  const where = location ? ` in “${location}”` : "";
-  if (total === 0) {
-    el.classList.add("result", "empty-result");
-    el.textContent = `No GitHub users match “${name}”${where}. Try a different name or area.`;
-    return;
-  }
-  const count = document.createElement("strong");
-  count.textContent = `${total.toLocaleString()} user${total === 1 ? "" : "s"}`;
-  el.classList.add("result");
-  el.append(
-    "GitHub found ", count, ` for “${name}”${where}. ` +
-    `Fetching their Gmail addresses will take ${roughDuration(seconds)}.`,
-  );
+function renderChecked() {
+  els.checkedCount.textContent = state.checkedTotal.toLocaleString();
+  els.checkedStatus.hidden = !state.hasToken || state.changingToken || state.checkedTotal === 0;
+  els.checkedForget.disabled = state.busy;
 }
 
 function updateControls() {
@@ -257,40 +211,43 @@ function updateControls() {
   els.tokenStatus.hidden = !state.hasToken || state.changingToken;
 
   const ready = state.hasToken && !state.busy;
-  const { name } = inputs();
-  els.name.disabled = !ready;
   els.location.disabled = !ready;
-  els.estimateBtn.disabled = !ready || state.estimating || !name;
-  els.estimateBtn.textContent = state.estimating ? "Estimating…" : "Estimate";
-  els.fetchBtn.disabled = !ready || state.estimating ||
-    !(estimateMatchesInputs() && state.estimate.total > 0);
+  els.fetchBtn.disabled = !ready || !els.location.value.trim();
   els.fetchBtn.textContent = state.busy ? "Fetching…" : "Fetch";
   els.stopBtn.hidden = !state.busy;
   els.clearBtn.disabled = state.busy;
   els.tokenChange.disabled = state.busy;
-  renderEstimate();
+  renderChecked();
 }
 
-function setProgress(checked, total) {
-  if (total > 0) {
-    els.barFill.classList.remove("indeterminate");
-    els.barFill.style.width = `${Math.min(100, (checked / total) * 100)}%`;
-  }
-  let text = `Checked ${checked.toLocaleString()} of ${total.toLocaleString()} profile(s) · ` +
-             `${state.foundThisRun} Gmail address(es) found`;
-  if (checked >= 5 && total > checked) {
-    const perProfile = (Date.now() - state.startedAt) / 1000 / checked;
-    text += ` · about ${formatDuration(perProfile * (total - checked))} left`;
-  }
+function setStatus(text) {
   els.status.textContent = text;
+  els.status.hidden = !text;
+}
+
+/** One line of progress text, e.g. "Checked 1,240 of 60,340 · 87 Gmail found · 3,000 skipped". */
+function showProgress() {
+  const done = state.checkedThisRun + state.skippedThisRun;
+  let text = `Checked ${state.checkedThisRun.toLocaleString()}`;
+  if (state.total) text += ` of ${state.total.toLocaleString()}`;
+  text += ` · ${state.foundThisRun.toLocaleString()} Gmail found`;
+  if (state.skippedThisRun) {
+    text += ` · ${state.skippedThisRun.toLocaleString()} skipped (already checked)`;
+  }
+  if (state.checkedThisRun >= 5 && state.total > done) {
+    const perProfile = (Date.now() - state.startedAt) / 1000 / state.checkedThisRun;
+    text += ` · about ${formatDuration(perProfile * (state.total - done))} left`;
+  }
+  setStatus(text);
 }
 
 // ---------- API calls ----------
 
 async function loadStatus() {
   try {
-    const res = await fetch("/api/status");
-    state.hasToken = (await res.json()).token;
+    const data = await (await fetch("/api/status")).json();
+    state.hasToken = data.token;
+    state.checkedTotal = data.checked || 0;
   } catch {
     showError(els.error, "Could not reach the server. Is it running?");
   }
@@ -327,7 +284,7 @@ async function saveToken(token) {
     els.tokenInput.value = "";
     showError(els.error, "");
     updateControls();
-    els.name.focus();
+    els.location.focus();
   } catch (e) {
     showError(els.tokenError, e.message || "Could not reach the server.");
   } finally {
@@ -336,86 +293,53 @@ async function saveToken(token) {
   }
 }
 
-async function runEstimate() {
-  const { name, location } = inputs();
-  if (!name) {
-    els.name.focus();
-    return;
-  }
-  showError(els.error, "");
-  state.estimating = true;
-  state.estimate = null;
-  updateControls();
-  try {
-    const res = await fetch(`/api/estimate?${new URLSearchParams({ name, location })}`);
-    const data = await res.json();
-    if (!res.ok) {
-      if (data.code === "no_token" || data.code === "bad_token") state.hasToken = false;
-      throw new Error(data.error || "Could not get an estimate.");
-    }
-    // Remember which Name/Area this estimate belongs to.
-    state.estimate = { name, location, total: data.total, seconds: data.seconds };
-  } catch (e) {
-    showError(els.error, e.message || "Could not reach the server.");
-  } finally {
-    state.estimating = false;
-    updateControls();
-  }
-}
-
 // ---------- fetching ----------
 
-/**
- * End the current fetch. `succeeded` = finished normally ("done"): the
- * estimate is used up, so Fetch stays disabled until the user estimates again.
- * After Stop or an error the estimate is kept, so Fetch can be clicked again.
- */
-function finish(message, succeeded = false) {
+function finish(message) {
   if (source) {
     source.close();
     source = null;
   }
   state.busy = false;
-  if (succeeded) state.estimate = null;
-  els.barFill.classList.remove("indeterminate");
-  if (message !== undefined) els.status.textContent = message;
+  if (message !== undefined) setStatus(message);
   updateControls();
+  loadStatus();          // refresh the "already checked" count
+  loadResults();         // pick up anything saved after the last progress update
 }
 
 function startFetch() {
-  if (!estimateMatchesInputs() || !state.estimate.total) return;
-  const { name, location } = state.estimate;
+  const location = els.location.value.trim();
+  if (!location || state.busy || !state.hasToken) return;
 
   showError(els.error, "");
   fresh.clear();
   renderTable();
   state.foundThisRun = 0;
+  state.checkedThisRun = 0;
+  state.skippedThisRun = 0;
+  state.total = 0;
   state.startedAt = Date.now();
   state.runId = null;
   state.busy = true;
   updateControls();
 
-  els.progress.hidden = false;
-  els.query.textContent = "";
   els.info.hidden = true;
-  els.barFill.style.width = "";
-  els.barFill.classList.add("indeterminate");
-  els.status.textContent = "Searching GitHub…";
+  setStatus(`Searching GitHub for users in “${location}”…`);
 
-  source = new EventSource(`/api/fetch?${new URLSearchParams({ name, location })}`);
+  source = new EventSource(`/api/fetch?${new URLSearchParams({ location })}`);
   const on = (type, handler) =>
     source.addEventListener(type, (e) => handler(JSON.parse(e.data)));
 
   on("start", (d) => {
     state.runId = d.run;
-    els.query.textContent = "Query: " + d.query;
   });
 
   on("total", (d) => {
+    state.total = d.total;
     state.startedAt = Date.now();
-    els.status.textContent = d.total
-      ? `GitHub found ${d.total.toLocaleString()} user(s). Checking their profiles…`
-      : "Searching GitHub…";
+    setStatus(d.total
+      ? `GitHub found ${d.total.toLocaleString()} user(s) in “${location}”. Checking their profiles…`
+      : `Searching GitHub for users in “${location}”…`);
   });
 
   on("info", (d) => {
@@ -424,27 +348,43 @@ function startFetch() {
   });
 
   on("wait", (d) => {
-    els.status.textContent =
-      `GitHub rate limit reached. Continuing automatically in ${formatDuration(d.seconds)}… ` +
-      `(${state.foundThisRun} Gmail address(es) found so far)`;
+    setStatus(`GitHub rate limit reached. Continuing automatically in ${formatDuration(d.seconds)}… ` +
+              `(${state.foundThisRun} Gmail address(es) found so far)`);
   });
 
-  on("checked", (d) => setProgress(d.checked, d.total));
+  on("skipped", (d) => {
+    state.skippedThisRun = d.skipped;
+    showProgress();
+  });
+
+  on("checked", (d) => {
+    state.checkedThisRun = d.checked;
+    state.skippedThisRun = d.skipped;
+    showProgress();
+  });
 
   on("found", (d) => {
     state.foundThisRun += 1;
+    state.checkedThisRun = d.checked;
+    state.skippedThisRun = d.skipped;
     records.set(d.record.login, d.record);
     fresh.add(d.record.login);
     renderTable();          // keeps the current page
-    setProgress(d.checked, d.total);
+    showProgress();
   });
 
   on("done", (d) => {
-    els.barFill.style.width = "100%";
-    finish(d.checked === 0
-      ? "No GitHub users matched this search."
-      : `Done. Checked ${d.checked.toLocaleString()} profile(s) and found ${d.found} Gmail address(es).`,
-      true);
+    let msg;
+    if (d.checked === 0 && d.skipped === 0) {
+      msg = `No GitHub users matched “${location}”.`;
+    } else if (d.checked === 0) {
+      msg = `Nothing new. All ${d.skipped.toLocaleString()} matching profiles were already checked.`;
+    } else {
+      msg = `Done. Checked ${d.checked.toLocaleString()} new profile(s) and found ${d.found} Gmail address(es)`;
+      if (d.skipped) msg += `, skipped ${d.skipped.toLocaleString()} already checked`;
+      msg += ".";
+    }
+    finish(msg);
   });
 
   on("fail", (d) => {
@@ -485,20 +425,13 @@ els.tokenCancel.addEventListener("click", () => {
   updateControls();
 });
 
-// Pressing Enter in Name/Area runs Estimate (the form's submit button).
+// Pressing Enter in Area (or clicking Fetch) starts the fetch.
 els.form.addEventListener("submit", (e) => {
   e.preventDefault();
-  if (!els.estimateBtn.disabled) runEstimate();
+  startFetch();
 });
 
-// Changing Name or Area invalidates the estimate, so Fetch is disabled again.
-[els.name, els.location].forEach((input) =>
-  input.addEventListener("input", () => {
-    if (state.estimate && !estimateMatchesInputs()) state.estimate = null;
-    updateControls();
-  }));
-
-els.fetchBtn.addEventListener("click", startFetch);
+els.location.addEventListener("input", updateControls);
 
 els.stopBtn.addEventListener("click", () => {
   // Tell the server to stop checking profiles right away (saves API quota).
@@ -510,7 +443,19 @@ els.stopBtn.addEventListener("click", () => {
     }).catch(() => {});
   }
   finish(`Stopped. ${state.foundThisRun} address(es) found so far are saved. ` +
-         "Click Fetch to run it again.");
+         "Click Fetch to continue — profiles already checked will be skipped.");
+});
+
+els.checkedForget.addEventListener("click", async () => {
+  if (!confirm("Forget which GitHub profiles were already checked? " +
+               "The next fetch will check every profile again. Saved addresses are kept.")) return;
+  try {
+    await fetch("/api/checked", { method: "DELETE" });
+    state.checkedTotal = 0;
+    updateControls();
+  } catch {
+    showError(els.error, "Could not clear the checked history.");
+  }
 });
 
 els.clearBtn.addEventListener("click", async () => {
@@ -529,6 +474,7 @@ els.clearBtn.addEventListener("click", async () => {
 updateControls();
 loadStatus();
 loadResults();
+
 
 // ===========================================================================
 // Send emails (self-contained; reuses $, showError and formatDuration above)
