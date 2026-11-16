@@ -28,7 +28,7 @@ update in the browser while it runs. Click **Stop** at any time; the next
 - Keeps only `@gmail.com` and `@googlemail.com` addresses; all other emails are ignored
 - Results table with each user's **GitHub avatar**, name, profile link, area and Gmail address, **20 rows per page**
 - Export to **CSV**, **TXT** (one address per line) or **XLSX** (Excel)
-- **Send emails** from your own Gmail account to an uploaded list of people who opted in — with a title, content, a time gap between emails, a daily limit, automatic resume, and permanent de-duplication (see [Sending emails](#sending-emails))
+- **Send emails** from your own Gmail account to the stored addresses you tick (only people who opted in) — with a title, content, a time gap between emails, a daily limit, automatic resume, and permanent de-duplication (see [Sending emails](#sending-emails))
 - First-run setup screen for the **GitHub token**, so anyone who clones the project can paste their token in the browser
 - Saves results in SQLite, so they're still there after a restart and repeated searches don't create duplicates
 - Light and dark mode, and works on mobile
@@ -183,7 +183,7 @@ never uploaded), so you only do this once until you change accounts.
 
 **Each send:**
 
-1. Upload a **TXT file** of recipient addresses (the project's TXT export has the right format).
+1. In the **Send** tab, tick the people who agreed to hear from you in **Stored Gmail addresses**. Already-sent rows can't be ticked; **Only not sent yet** hides them and **Select all** ticks every address not sent yet.
 2. Enter a **Title** and **Content**.
 3. Set the **Time gap** between emails and the **Daily limit** (default 200, maximum 500).
 4. Optionally tick **Add unsubscribe line** to append a sender identity and opt-out note to each email.
@@ -200,4 +200,4 @@ never uploaded), so you only do this once until you change accounts.
 
 - **Only public emails are collected.** If a user hides their email, the app saves nothing for them. It doesn't try to recover hidden addresses from commits or activity.
 - **GitHub's Acceptable Use Policy** forbids using data taken from GitHub to send unsolicited email or to sell users' personal information.
-- **The results are personal data.** Privacy laws such as Japan's APPI and the EU's GDPR may apply. Keep `data/results.db` and any exported files private, and use **Clear all** when you're finished.
+- **The results are personal data.** Privacy laws such as Japan's APPI and the EU's GDPR may apply. Keep `data/results.db` and any exported files private, and delete `data/results.db` when you're finished.

@@ -373,6 +373,14 @@ class SendTests(unittest.TestCase):
         start = next(d for t, d in events if t == "start")
         self.assertEqual(start["cap"], 500)
 
+    def test_sent_list(self):
+        self.assertEqual(self.get_json("/api/sent"), [])
+        self.connect_gmail()
+        self.send(["B@gmail.com", "a@gmail.com"])
+        rows = self.get_json("/api/sent")
+        self.assertEqual(sorted(r["email"] for r in rows), ["a@gmail.com", "b@gmail.com"])
+        self.assertTrue(all(r["sent_at"] for r in rows))
+
     def test_reset_sent_history(self):
         self.connect_gmail()
         self.send(["a@gmail.com"])

@@ -14,6 +14,7 @@ HTTP backend: serves the frontend and a small JSON / Server-Sent Events API.
   POST   /api/gmail                 {address, app_password, sender_name} -> verify + save to .env
   POST   /api/send/start            {recipients[], subject, body, gap, cap, add_unsub} -> {job}
   GET    /api/send/stream?job=      live send progress (text/event-stream)
+  GET    /api/sent                  every address already sent to [{email, sent_at}]
   POST   /api/send/stop             {job} -> stop the running send
   DELETE /api/sent                  reset the "already sent" history
   DELETE /api/checked               forget which GitHub profiles were already checked
@@ -227,6 +228,12 @@ class Handler(BaseHTTPRequestHandler):
             self._json(self._gmail_status())
         elif url.path == "/api/send/stream":
             self._send_stream(parse_qs(url.query))
+        elif url.path == "/api/sent":
+            store = mailer.SentStore(self.server.db_path)
+            try:
+                self._json(store.all())
+            finally:
+                store.close()
         else:
             self._json({"error": "Not found"}, 404)
 
@@ -428,10 +435,10 @@ class Handler(BaseHTTPRequestHandler):
 
         raw = body.get("recipients")
         if not isinstance(raw, list):
-            return self._json({"error": "No recipient list was uploaded."}, 400)
+            return self._json({"error": "No recipients were selected."}, 400)
         recipients = mailer.parse_recipients("\n".join(r for r in raw if isinstance(r, str)))
         if not recipients:
-            return self._json({"error": "The uploaded file has no email addresses."}, 400)
+            return self._json({"error": "Please tick at least one address to send to."}, 400)
         if len(recipients) > 20000:
             return self._json({"error": "That list is too large (over 20,000 addresses)."}, 400)
 

@@ -28,7 +28,6 @@ const els = {
   results: $("results"),
   empty: $("empty"),
   count: $("count"),
-  clearBtn: $("clear-btn"),
   pager: $("pager"),
   pagerInfo: $("pager-info"),
   pagerButtons: $("pager-buttons"),
@@ -139,7 +138,7 @@ function pageList(current, pages) {
   return out;
 }
 
-function pageButton(label, page, { disabled = false, current = false, aria } = {}) {
+function pageButton(label, page, goTo, { disabled = false, current = false, aria } = {}) {
   const b = document.createElement("button");
   b.type = "button";
   b.className = "page-btn";
@@ -147,53 +146,71 @@ function pageButton(label, page, { disabled = false, current = false, aria } = {
   b.disabled = disabled;
   if (current) b.setAttribute("aria-current", "page");
   if (aria) b.setAttribute("aria-label", aria);
-  b.addEventListener("click", () => {
-    state.page = page;
-    renderTable();
-  });
+  b.addEventListener("click", () => goTo(page));
   return b;
 }
 
-function renderPager(totalRows, pages, start, shown) {
-  els.pager.hidden = totalRows === 0;
+/**
+ * Fill a pager: ui = {pager, info, buttons}; goTo(page) is called on click.
+ * Shared by the Fetch-tab results table and the Send-tab recipients table.
+ */
+function renderPager(ui, { page, pages, totalRows, start, shown }, goTo) {
+  ui.pager.hidden = totalRows === 0;
   if (!totalRows) return;
-  els.pagerInfo.textContent =
+  ui.info.textContent =
     `Showing ${start + 1}–${start + shown} of ${totalRows.toLocaleString()}`;
 
   if (pages <= 1) {
-    els.pagerButtons.replaceChildren();
+    ui.buttons.replaceChildren();
     return;
   }
-  const buttons = [pageButton("‹ Prev", state.page - 1,
-    { disabled: state.page === 1, aria: "Previous page" })];
-  for (const p of pageList(state.page, pages)) {
+  const buttons = [pageButton("‹ Prev", page - 1, goTo,
+    { disabled: page === 1, aria: "Previous page" })];
+  for (const p of pageList(page, pages)) {
     if (p === null) {
       const gap = document.createElement("span");
       gap.className = "page-gap";
       gap.textContent = "…";
       buttons.push(gap);
     } else {
-      buttons.push(pageButton(String(p), p, { current: p === state.page, aria: `Page ${p}` }));
+      buttons.push(pageButton(String(p), p, goTo, { current: p === page, aria: `Page ${p}` }));
     }
   }
-  buttons.push(pageButton("Next ›", state.page + 1,
-    { disabled: state.page === pages, aria: "Next page" }));
-  els.pagerButtons.replaceChildren(...buttons);
+  buttons.push(pageButton("Next ›", page + 1, goTo,
+    { disabled: page === pages, aria: "Next page" }));
+  ui.buttons.replaceChildren(...buttons);
 }
 
-function renderTable() {
-  const rows = [...records.values()].sort((a, b) =>
+/** Saved records, newest first (same order in both tables). */
+function sortedRecords() {
+  return [...records.values()].sort((a, b) =>
     (b.fetched_at || "").localeCompare(a.fetched_at || "") || a.login.localeCompare(b.login));
+}
 
+/** Clamp `page` and slice one page out of `rows`. */
+function paginate(rows, page) {
   const pages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
-  state.page = Math.min(Math.max(1, state.page), pages);
-  const start = (state.page - 1) * PAGE_SIZE;
+  page = Math.min(Math.max(1, page), pages);
+  const start = (page - 1) * PAGE_SIZE;
   const pageRows = rows.slice(start, start + PAGE_SIZE);
+  return { page, pages, start, pageRows, totalRows: rows.length, shown: pageRows.length };
+}
 
-  els.results.replaceChildren(...pageRows.map(rowFor));
+// Called whenever `records` changes, so the Send tab can redraw its table.
+const recordListeners = [];
+
+function renderTable() {
+  const view = paginate(sortedRecords(), state.page);
+  state.page = view.page;
+
+  els.results.replaceChildren(...view.pageRows.map(rowFor));
   els.count.textContent = records.size.toLocaleString();
   els.empty.hidden = records.size > 0;
-  renderPager(rows.length, pages, start, pageRows.length);
+  renderPager({ pager: els.pager, info: els.pagerInfo, buttons: els.pagerButtons }, view, (p) => {
+    state.page = p;
+    renderTable();
+  });
+  recordListeners.forEach((fn) => fn());
 }
 
 // ---------- rendering: controls + status ----------
@@ -215,7 +232,6 @@ function updateControls() {
   els.fetchBtn.disabled = !ready || !els.location.value.trim();
   els.fetchBtn.textContent = state.busy ? "Fetching…" : "Fetch";
   els.stopBtn.hidden = !state.busy;
-  els.clearBtn.disabled = state.busy;
   els.tokenChange.disabled = state.busy;
   renderChecked();
 }
@@ -458,18 +474,36 @@ els.checkedForget.addEventListener("click", async () => {
   }
 });
 
-els.clearBtn.addEventListener("click", async () => {
-  if (!records.size || !confirm("Delete all saved addresses?")) return;
-  try {
-    await fetch("/api/results", { method: "DELETE" });
-    records.clear();
-    fresh.clear();
-    state.page = 1;
-    renderTable();
-  } catch {
-    showError(els.error, "Could not clear results.");
-  }
+// ---------- tabs ----------
+
+const tabs = [
+  { tab: $("tab-fetch"), panel: $("panel-fetch"), hash: "#fetch" },
+  { tab: $("tab-send"), panel: $("panel-send"), hash: "#send" },
+];
+
+function selectTab(index, focus = false) {
+  tabs.forEach((t, i) => {
+    const active = i === index;
+    t.tab.setAttribute("aria-selected", String(active));
+    t.tab.tabIndex = active ? 0 : -1;
+    t.panel.hidden = !active;
+  });
+  if (focus) tabs[index].tab.focus();
+  history.replaceState(null, "", tabs[index].hash);
+}
+
+tabs.forEach((t, i) => {
+  t.tab.addEventListener("click", () => selectTab(i));
+  t.tab.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
+      e.preventDefault();
+      const step = e.key === "ArrowRight" ? 1 : -1;
+      selectTab((i + step + tabs.length) % tabs.length, true);
+    }
+  });
 });
+
+if (location.hash === "#send") selectTab(1);
 
 updateControls();
 loadStatus();
@@ -494,8 +528,6 @@ loadResults();
     who: $("gmail-who"),
     change: $("gmail-change"),
     compose: $("compose"),
-    file: $("recipients-file"),
-    fileInfo: $("recipients-info"),
     subject: $("subject"),
     content: $("content"),
     gap: $("gap"),
@@ -511,19 +543,164 @@ loadResults();
     logWrap: $("send-log-wrap"),
     logCount: $("send-log-count"),
     log: $("send-log"),
+    recipientsTotal: $("recipients-total"),
+    // stored-address picker
+    pickRows: $("pick-rows"),
+    pickEmpty: $("pick-empty"),
+    pickSelected: $("pick-selected"),
+    pickUnsent: $("pick-unsent"),
+    pickAll: $("pick-all"),
+    pickPager: $("pick-pager"),
+    pickPagerInfo: $("pick-pager-info"),
+    pickPagerButtons: $("pick-pager-buttons"),
   };
 
   const s = {
     configured: false,
     changing: false,
     busy: false,
-    recipients: [],
     jobId: null,
     processed: 0,
     capDefault: 200,
     capMax: 500,
   };
   let source = null;
+  const sentAt = new Map();   // lower-case email -> when it was sent (from /api/sent)
+  const selected = new Set(); // lower-case emails ticked in the stored-address table
+  let pickPage = 1;
+
+  // ---------- stored-address picker ----------
+
+  const emailKey = (r) => (r.email || "").trim().toLowerCase();
+
+  /** Rows shown in the picker, after the "Only not sent yet" filter. */
+  function pickList() {
+    const rows = sortedRecords();
+    return m.pickUnsent.checked ? rows.filter((r) => !sentAt.has(emailKey(r))) : rows;
+  }
+
+  /** Addresses in the current view that can be ticked (not sent yet), de-duplicated. */
+  function selectableKeys() {
+    return [...new Set(pickList().map(emailKey).filter((k) => k && !sentAt.has(k)))];
+  }
+
+  /** Everyone the next Send goes to: exactly the ticked rows, in table order. */
+  function recipients() {
+    return [...new Set(sortedRecords().map(emailKey).filter((k) => selected.has(k)))];
+  }
+
+  function formatSentAt(iso) {
+    const d = new Date(iso);
+    return Number.isNaN(d.getTime()) ? "Sent" : `Sent ${d.toLocaleDateString()}`;
+  }
+
+  function pickRowFor(r) {
+    const k = emailKey(r);
+    const sent = sentAt.has(k);
+    const tr = document.createElement("tr");
+    if (sent) tr.className = "is-sent";
+
+    const checkCell = td(undefined, "check-col");
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = selected.has(k);
+    cb.disabled = sent || s.busy;
+    cb.setAttribute("aria-label", `Select ${r.email}`);
+    cb.addEventListener("change", () => {
+      if (cb.checked) selected.add(k);
+      else selected.delete(k);
+      renderPick();     // also re-ticks other rows with the same address
+    });
+    checkCell.appendChild(cb);
+
+    const avatarCell = td(undefined, "avatar-col");
+    const img = document.createElement("img");
+    img.className = "avatar";
+    img.src = avatarSrc(r);
+    img.alt = "";
+    img.loading = "lazy";
+    img.width = 36;
+    img.height = 36;
+    avatarCell.appendChild(img);
+
+    const profile = safeUrl(r.profile_url, `https://github.com/${encodeURIComponent(r.login)}`);
+    const status = td(sent ? formatSentAt(sentAt.get(k)) : "Not sent",
+                      sent ? "status-cell sent" : "status-cell");
+    tr.append(
+      checkCell,
+      avatarCell,
+      td(r.name || "—"),
+      linkTd("@" + r.login, profile),
+      td(r.location || "—"),
+      td(r.email),
+      status,
+    );
+
+    // Clicking anywhere on the row (except a link) toggles its checkbox.
+    if (!cb.disabled) {
+      tr.classList.add("selectable");
+      tr.addEventListener("click", (e) => {
+        if (e.target === cb || e.target.closest("a")) return;
+        cb.click();
+      });
+    }
+    return tr;
+  }
+
+  function renderPick() {
+    const view = paginate(pickList(), pickPage);
+    pickPage = view.page;
+    m.pickRows.replaceChildren(...view.pageRows.map(pickRowFor));
+
+    m.pickEmpty.hidden = view.totalRows > 0;
+    m.pickEmpty.textContent = records.size === 0
+      ? "No stored addresses. Fetch some in the Fetch tab first."
+      : "Every stored address has already been sent to.";
+    renderPager({ pager: m.pickPager, info: m.pickPagerInfo, buttons: m.pickPagerButtons },
+                view, (p) => { pickPage = p; renderPick(); });
+
+    const keys = selectableKeys();
+    const allTicked = keys.length > 0 && keys.every((k) => selected.has(k));
+    m.pickAll.textContent = allTicked ? "Unselect all" : `Select all (${keys.length.toLocaleString()})`;
+    m.pickAll.disabled = s.busy || keys.length === 0;
+    m.pickSelected.textContent = `${selected.size.toLocaleString()} selected`;
+    updateRecipients();
+  }
+
+  function updateRecipients() {
+    const total = recipients().length;
+    m.recipientsTotal.textContent = total
+      ? `Will send to the ${total.toLocaleString()} address(es) ticked in the table above.`
+      : "No recipients yet. Tick addresses in the table above.";
+    m.recipientsTotal.classList.toggle("muted", total === 0);
+    updateSendButton();
+  }
+
+  async function loadSent() {
+    try {
+      const rows = await (await fetch("/api/sent")).json();
+      sentAt.clear();
+      rows.forEach((r) => sentAt.set(r.email.toLowerCase(), r.sent_at));
+      sentAt.forEach((_, k) => selected.delete(k));   // can't be sent twice anyway
+    } catch {
+      /* table still works; sent status just isn't shown */
+    }
+    renderPick();
+  }
+
+  m.pickUnsent.addEventListener("change", () => {
+    pickPage = 1;
+    renderPick();
+  });
+
+  m.pickAll.addEventListener("click", () => {
+    const keys = selectableKeys();
+    const allTicked = keys.every((k) => selected.has(k));
+    keys.forEach((k) => (allTicked ? selected.delete(k) : selected.add(k)));
+    renderPick();
+  });
+
+  recordListeners.push(renderPick);
 
   // ---------- gmail account ----------
 
@@ -608,48 +785,11 @@ loadResults();
     renderAccount();
   });
 
-  // ---------- recipients file ----------
-
-  function parseEmails(text) {
-    const seen = new Set();
-    const out = [];
-    for (const token of text.split(/[\s,;]+/)) {
-      const addr = token.trim().replace(/^<|>$/g, "").toLowerCase();
-      if (addr && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(addr) && !seen.has(addr)) {
-        seen.add(addr);
-        out.push(addr);
-      }
-    }
-    return out;
-  }
-
-  m.file.addEventListener("change", () => {
-    const file = m.file.files[0];
-    if (!file) {
-      s.recipients = [];
-      m.fileInfo.textContent = "";
-      updateSendButton();
-      return;
-    }
-    const reader = new FileReader();
-    reader.onload = () => {
-      s.recipients = parseEmails(String(reader.result || ""));
-      m.fileInfo.textContent = s.recipients.length
-        ? `${s.recipients.length} email address(es) loaded from ${file.name}`
-        : `No valid email addresses found in ${file.name}`;
-      updateSendButton();
-    };
-    reader.onerror = () => {
-      showError(m.error, "Could not read that file.");
-    };
-    reader.readAsText(file);
-  });
-
   // ---------- send ----------
 
   function updateSendButton() {
     const ready = s.configured && !s.changing && !s.busy &&
-      s.recipients.length > 0 && m.subject.value.trim() && m.content.value.trim();
+      recipients().length > 0 && m.subject.value.trim() && m.content.value.trim();
     m.sendBtn.disabled = !ready;
   }
 
@@ -669,8 +809,8 @@ loadResults();
     s.busy = busy;
     m.sendBtn.textContent = busy ? "Sending…" : "Send";
     m.stopBtn.hidden = !busy;
-    [m.file, m.subject, m.content, m.gap, m.cap, m.unsub, m.change].forEach((el) => (el.disabled = busy));
-    updateSendButton();
+    [m.subject, m.content, m.gap, m.cap, m.unsub, m.change].forEach((el) => (el.disabled = busy));
+    renderPick();         // locks the checkboxes while sending; also updates the Send button
   }
 
   function finishSend(message) {
@@ -678,6 +818,7 @@ loadResults();
     setSendBusy(false);
     if (message !== undefined) m.statusLine.textContent = message;
     loadGmailStatus();   // refresh sent-today / total
+    loadSent();          // mark newly sent rows and untick them
   }
 
   async function startSend() {
@@ -688,8 +829,9 @@ loadResults();
     s.processed = 0;
     s.jobId = null;
 
+    const list = recipients();
     const payload = {
-      recipients: s.recipients,
+      recipients: list,
       subject: m.subject.value.trim(),
       body: m.content.value,
       gap: Number(m.gap.value) || 0,
@@ -723,7 +865,7 @@ loadResults();
       return;
     }
 
-    const total = s.recipients.length;
+    const total = list.length;
     const tick = () => {
       s.processed += 1;
       m.bar.style.width = `${Math.min(100, (s.processed / total) * 100)}%`;
@@ -741,6 +883,9 @@ loadResults();
       updateCounter(d.sent_today, undefined);
       m.statusLine.textContent = `Sent ${d.sent} · to ${d.email}`;
       addLog("sent", `✓ sent to ${d.email}`);
+      sentAt.set(d.email.toLowerCase(), new Date().toISOString());   // grey the row out right away
+      selected.delete(d.email.toLowerCase());
+      renderPick();
     });
     on("skipped", (d) => {
       tick();
@@ -788,4 +933,5 @@ loadResults();
   });
 
   loadGmailStatus();
+  loadSent();
 })();
