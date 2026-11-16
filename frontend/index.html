@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GitHub Gmail Finder</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="page-header">
+    <h1>GitHub Gmail Finder</h1>
+    <p class="muted">Search GitHub users by name and area, and collect the Gmail addresses they list publicly on their profiles.</p>
+  </header>
+
+  <main>
+    <!-- Shown when no GitHub token is saved yet, or when changing it -->
+    <section id="token-card" class="card" hidden>
+      <h2>Connect your GitHub token</h2>
+      <p class="muted">
+        This app needs a GitHub personal access token to search GitHub.
+        It is saved only on this computer, in the project's <code>.env</code> file.
+      </p>
+      <ol class="steps">
+        <li>Open <a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener">GitHub → New fine-grained token</a> (log in if asked).</li>
+        <li>Enter any name, choose an expiration, and select <b>Public repositories (read-only)</b>. No extra permissions are needed.</li>
+        <li>Click <b>Generate token</b>, copy it, and paste it below.</li>
+      </ol>
+      <form id="token-form" class="token-form" autocomplete="off">
+        <input id="token" type="password" placeholder="github_pat_..." spellcheck="false" required aria-label="GitHub token">
+        <button type="submit" id="token-save" class="btn primary">Save token</button>
+        <button type="button" id="token-cancel" class="btn secondary" hidden>Cancel</button>
+      </form>
+      <p id="token-error" class="error" role="alert" hidden></p>
+    </section>
+
+    <section id="search-card" class="card">
+      <form id="fetch-form" class="form" autocomplete="off">
+        <div class="field">
+          <label for="name">Name</label>
+          <input id="name" name="name" type="text" placeholder="e.g. John" required>
+        </div>
+        <div class="field">
+          <label for="location">Area</label>
+          <input id="location" name="location" type="text" placeholder="e.g. Tokyo">
+        </div>
+        <div class="actions">
+          <button type="submit" id="fetch-btn" class="btn primary">Fetch</button>
+          <button type="button" id="stop-btn" class="btn secondary" hidden>Stop</button>
+        </div>
+      </form>
+
+      <p id="token-status" class="token-status muted" hidden>
+        <span class="ok-dot" aria-hidden="true"></span> GitHub token saved
+        · <button type="button" id="token-change" class="link-btn">Change token</button>
+      </p>
+
+      <div id="progress" class="progress" hidden>
+        <p id="query" class="query"></p>
+        <div class="bar"><div id="bar-fill" class="bar-fill"></div></div>
+        <p id="status" class="status" aria-live="polite"></p>
+        <p id="info" class="info muted" hidden></p>
+      </div>
+
+      <p id="error" class="error" role="alert" hidden></p>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <h2>Saved Gmail addresses <span id="count" class="badge">0</span></h2>
+        <div class="card-actions">
+          <span class="export-label muted">Export</span>
+          <a class="btn secondary small" href="/api/results.csv" download>CSV</a>
+          <a class="btn secondary small" href="/api/results.txt" download>TXT</a>
+          <a class="btn secondary small" href="/api/results.xlsx" download>XLSX</a>
+          <button type="button" id="clear-btn" class="btn secondary small danger">Clear all</button>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th class="avatar-col"><span class="sr-only">Avatar</span></th>
+              <th>Name</th>
+              <th>GitHub</th>
+              <th>Area</th>
+              <th>Gmail</th>
+            </tr>
+          </thead>
+          <tbody id="results"></tbody>
+        </table>
+      </div>
+      <p id="empty" class="empty muted">No addresses saved yet. Enter a name and area, then press Fetch.</p>
+    </section>
+  </main>
+
+  <footer class="page-footer muted">
+    Only emails that users have made public on their GitHub profiles are collected.
+    Don't use them for unsolicited email, and delete the data when you're done (GitHub Acceptable Use Policy).
+  </footer>
+
+  <script src="/app.js"></script>
+</body>
+</html>

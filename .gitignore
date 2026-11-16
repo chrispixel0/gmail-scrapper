@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+
+# Secrets: your GitHub token
+.env
+
+# Collected data (real people's email addresses)
+data/
+*.db
+gmail_results.*
+results*.csv
+
+# Editor settings
+.vscode/
