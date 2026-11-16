@@ -14,8 +14,10 @@ HTTP backend: serves the frontend and a small JSON / Server-Sent Events API.
   POST   /api/gmail                 {address, app_password, sender_name} -> verify + save to .env
   POST   /api/send/start            {recipients[], subject, body, gap, cap, add_unsub} -> {job}
   GET    /api/send/stream?job=      live send progress (text/event-stream)
+  GET    /api/sent                  every address already sent to [{email, sent_at}]
   POST   /api/send/stop             {job} -> stop the running send
   DELETE /api/sent                  reset the "already sent" history
+  DELETE /api/checked               forget which GitHub profiles were already checked
 """
 
 from __future__ import annotations
@@ -205,7 +207,12 @@ class Handler(BaseHTTPRequestHandler):
             filename, ctype = STATIC_FILES[url.path]
             self._send(200, (FRONTEND_DIR / filename).read_bytes(), ctype)
         elif url.path == "/api/status":
-            self._json({"token": self.server.has_token})
+            store = finder.Store(self.server.db_path)
+            try:
+                checked = store.checked_count()
+            finally:
+                store.close()
+            self._json({"token": self.server.has_token, "checked": checked})
         elif url.path == "/api/results":
             self._json(self._rows())
         elif export:
@@ -221,6 +228,12 @@ class Handler(BaseHTTPRequestHandler):
             self._json(self._gmail_status())
         elif url.path == "/api/send/stream":
             self._send_stream(parse_qs(url.query))
+        elif url.path == "/api/sent":
+            store = mailer.SentStore(self.server.db_path)
+            try:
+                self._json(store.all())
+            finally:
+                store.close()
         else:
             self._json({"error": "Not found"}, 404)
 
@@ -349,6 +362,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"deleted": store.clear()})
             finally:
                 store.close()
+        elif path == "/api/checked":
+            store = finder.Store(self.server.db_path)
+            try:
+                self._json({"deleted": store.clear_checked()})
+            finally:
+                store.close()
         else:
             self._json({"error": "Not found"}, 404)
 
@@ -375,8 +394,8 @@ class Handler(BaseHTTPRequestHandler):
         if not self.server.has_token:
             emit("fail", {"message": "Please save your GitHub token first.", "code": "no_token"})
             return
-        if not name:
-            emit("fail", {"message": "Please enter a name."})
+        if not name and not location:
+            emit("fail", {"message": "Please enter an area."})
             return
         # A new fetch replaces any earlier one that is still winding down (e.g. after Stop).
         self.server.stop_runs()
@@ -389,7 +408,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             client = self.server.client_factory(self.server.token)
             for ev in finder.iter_fetch(name, location, client, store,
-                                        max_results=max_results, delay=self.server.delay):
+                                        max_results=max_results, delay=self.server.delay,
+                                        skip_checked=True, cancel=cancelled):
                 if cancelled.is_set():
                     break           # Stop was pressed, or a newer fetch started
                 if ev["type"] == "start":
@@ -415,10 +435,10 @@ class Handler(BaseHTTPRequestHandler):
 
         raw = body.get("recipients")
         if not isinstance(raw, list):
-            return self._json({"error": "No recipient list was uploaded."}, 400)
+            return self._json({"error": "No recipients were selected."}, 400)
         recipients = mailer.parse_recipients("\n".join(r for r in raw if isinstance(r, str)))
         if not recipients:
-            return self._json({"error": "The uploaded file has no email addresses."}, 400)
+            return self._json({"error": "Please tick at least one address to send to."}, 400)
         if len(recipients) > 20000:
             return self._json({"error": "That list is too large (over 20,000 addresses)."}, 400)
 

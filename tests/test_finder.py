@@ -23,9 +23,13 @@ class QueryTests(unittest.TestCase):
     def test_strips_user_quotes(self):
         self.assertEqual(finder.build_query('"ABC"', None), "ABC in:name type:user")
 
-    def test_empty_name_rejected(self):
+    def test_empty_name_and_area_rejected(self):
         with self.assertRaises(ValueError):
-            finder.build_query("  ")
+            finder.build_query("  ", "")
+
+    def test_area_only_query(self):
+        self.assertEqual(finder.build_query("", "Tokyo"), "location:Tokyo type:user")
+        self.assertEqual(finder.build_query(None, "New York"), 'location:"New York" type:user')
 
 
 class GmailTests(unittest.TestCase):
@@ -116,6 +120,52 @@ class IterFetchTests(unittest.TestCase):
         events = self.fetch(FakeClient(rate_limit_once=True))
         self.assertTrue(any(e["type"] == "wait" for e in events))
         self.assertEqual(events[-1]["checked"], 4)
+
+    def test_skip_checked_skips_profiles_from_earlier_fetches(self):
+        self.fetch(skip_checked=True)
+        self.assertEqual(self.store.checked_count(), 4)      # Gmail or not, all are remembered
+        client = FakeClient()
+        events = self.fetch(client, skip_checked=True)
+        self.assertEqual((events[-1]["checked"], events[-1]["skipped"]), (0, 4))
+        self.assertEqual(client.profile_calls, 0)
+
+    def test_stopped_fetch_resumes_where_it_left_off(self):
+        gen = finder.iter_fetch("ABC", "XYZ", FakeClient(), self.store, skip_checked=True)
+        for ev in gen:                                        # stop after 2 profiles
+            if ev["type"] in ("checked", "found") and ev["checked"] == 2:
+                gen.close()
+                break
+        client = FakeClient()
+        events = self.fetch(client, skip_checked=True)
+        self.assertEqual((events[-1]["checked"], events[-1]["skipped"]), (2, 2))
+        self.assertEqual(client.profile_calls, 2)             # only the 2 unchecked ones
+
+    def test_cancel_stops_before_next_profile(self):
+        import threading
+        cancel = threading.Event()
+        client = FakeClient()
+        gen = finder.iter_fetch("ABC", "XYZ", client, self.store, skip_checked=True, cancel=cancel)
+        for ev in gen:
+            if ev["type"] in ("checked", "found") and ev["checked"] == 1:
+                cancel.set()                                  # Stop pressed after the 1st profile
+        self.assertEqual(client.profile_calls, 1)             # no further profile was opened
+        self.assertEqual(self.store.checked_count(), 1)
+
+    def test_skipped_progress_reported_in_batches(self):
+        users = {f"u{i}": {"login": f"u{i}", "email": None, "created_at": "2015-01-01T00:00:00Z"}
+                 for i in range(250)}
+        for login in users:
+            self.store.mark_checked(login)
+        with mock.patch.object(finder, "SEARCH_RESULT_CAP", 1000):
+            events = self.fetch(FakeClient(users=users), skip_checked=True)
+        batches = [e["skipped"] for e in events if e["type"] == "skipped"]
+        self.assertEqual(batches, [100, 200])
+        self.assertEqual(events[-1]["skipped"], 250)
+
+    def test_clear_checked(self):
+        self.fetch(skip_checked=True)
+        self.assertEqual(self.store.clear_checked(), 4)
+        self.assertEqual(self.store.checked_count(), 0)
 
     def test_rerun_does_not_duplicate(self):
         self.fetch()

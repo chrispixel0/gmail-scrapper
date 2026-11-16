@@ -10,10 +10,17 @@
 <body>
   <header class="page-header">
     <h1>GitHub Gmail Finder</h1>
-    <p class="muted">Search GitHub users by name and area, and collect the Gmail addresses they list publicly on their profiles.</p>
+    <p class="muted">Search GitHub users by area, and collect the Gmail addresses they list publicly on their profiles.</p>
   </header>
 
   <main>
+    <nav class="tabs" role="tablist" aria-label="Sections">
+      <button type="button" class="tab" role="tab" id="tab-fetch" aria-controls="panel-fetch" aria-selected="true">Fetch</button>
+      <button type="button" class="tab" role="tab" id="tab-send" aria-controls="panel-send" aria-selected="false" tabindex="-1">Send</button>
+    </nav>
+
+    <!-- ============================ Fetch tab ============================ -->
+    <div id="panel-fetch" class="tab-panel" role="tabpanel" aria-labelledby="tab-fetch">
     <!-- Shown when no GitHub token is saved yet, or when changing it -->
     <section id="token-card" class="card" hidden>
       <h2>Connect your GitHub token</h2>
@@ -35,35 +42,28 @@
     </section>
 
     <section id="search-card" class="card">
-      <form id="fetch-form" class="form" autocomplete="off">
-        <div class="field">
-          <label for="name">Name</label>
-          <input id="name" name="name" type="text" placeholder="e.g. John" required>
-        </div>
+      <form id="fetch-form" class="form area-form" autocomplete="off">
         <div class="field">
           <label for="location">Area</label>
-          <input id="location" name="location" type="text" placeholder="e.g. Tokyo">
+          <input id="location" name="location" type="text" placeholder="e.g. Tokyo" required>
         </div>
         <div class="actions">
-          <button type="submit" id="estimate-btn" class="btn secondary">Estimate</button>
-          <button type="button" id="fetch-btn" class="btn primary" disabled>Fetch</button>
+          <button type="submit" id="fetch-btn" class="btn primary" disabled>Fetch</button>
           <button type="button" id="stop-btn" class="btn secondary" hidden>Stop</button>
         </div>
       </form>
 
-      <p id="estimate" class="estimate" aria-live="polite"></p>
+      <p id="status" class="status" aria-live="polite" hidden></p>
+      <p id="info" class="info muted" hidden></p>
 
       <p id="token-status" class="token-status muted" hidden>
         <span class="ok-dot" aria-hidden="true"></span> GitHub token saved
         · <button type="button" id="token-change" class="link-btn">Change token</button>
       </p>
-
-      <div id="progress" class="progress" hidden>
-        <p id="query" class="query"></p>
-        <div class="bar"><div id="bar-fill" class="bar-fill"></div></div>
-        <p id="status" class="status" aria-live="polite"></p>
-        <p id="info" class="info muted" hidden></p>
-      </div>
+      <p id="checked-status" class="token-status muted" hidden>
+        <span id="checked-count">0</span> GitHub profiles already checked (skipped on the next fetch)
+        · <button type="button" id="checked-forget" class="link-btn">Forget checked history</button>
+      </p>
 
       <p id="error" class="error" role="alert" hidden></p>
     </section>
@@ -76,7 +76,6 @@
           <a class="btn secondary small" href="/api/results.csv" download>CSV</a>
           <a class="btn secondary small" href="/api/results.txt" download>TXT</a>
           <a class="btn secondary small" href="/api/results.xlsx" download>XLSX</a>
-          <button type="button" id="clear-btn" class="btn secondary small danger">Clear all</button>
         </div>
       </div>
       <div class="table-wrap">
@@ -97,10 +96,48 @@
         <span id="pager-info" class="muted"></span>
         <div id="pager-buttons" class="pager-buttons"></div>
       </nav>
-      <p id="empty" class="empty muted">No addresses saved yet. Enter a name and area, press Estimate, then Fetch.</p>
+      <p id="empty" class="empty muted">No addresses saved yet. Enter an area, then press Fetch.</p>
     </section>
 
-    <!-- ============================ Send emails ============================ -->
+    </div>
+
+    <!-- ============================ Send tab ============================ -->
+    <div id="panel-send" class="tab-panel" role="tabpanel" aria-labelledby="tab-send" hidden>
+    <section class="card" id="pick-card">
+      <div class="card-head">
+        <h2>Stored Gmail addresses <span id="pick-selected" class="badge">0 selected</span></h2>
+        <div class="card-actions">
+          <label class="checkbox-field compact">
+            <input id="pick-unsent" type="checkbox">
+            <span>Only not sent yet</span>
+          </label>
+          <button type="button" id="pick-all" class="btn secondary small">Select all</button>
+        </div>
+      </div>
+      <p class="muted pick-hint">Tick only the people who agreed to receive your email. Ticked addresses are the recipients when you press Send.</p>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th class="check-col"><span class="sr-only">Select</span></th>
+              <th class="avatar-col"><span class="sr-only">Avatar</span></th>
+              <th>Name</th>
+              <th>GitHub</th>
+              <th>Area</th>
+              <th>Gmail</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody id="pick-rows"></tbody>
+        </table>
+      </div>
+      <nav id="pick-pager" class="pager" aria-label="Pages" hidden>
+        <span id="pick-pager-info" class="muted"></span>
+        <div id="pick-pager-buttons" class="pager-buttons"></div>
+      </nav>
+      <p id="pick-empty" class="empty muted">No stored addresses. Fetch some in the Fetch tab first.</p>
+    </section>
+
     <section class="card" id="send-card">
       <div class="card-head">
         <h2>Send emails</h2>
@@ -147,11 +184,7 @@
 
       <!-- Compose + send controls (enabled once Gmail is connected) -->
       <div id="compose">
-        <div class="field file-field">
-          <label for="recipients-file">Recipients (TXT file of email addresses)</label>
-          <input id="recipients-file" type="file" accept=".txt,text/plain">
-          <span id="recipients-info" class="muted"></span>
-        </div>
+        <p id="recipients-total" class="recipients-total"></p>
         <div class="field">
           <label for="subject">Title</label>
           <input id="subject" type="text" placeholder="Email subject" maxlength="200">
@@ -193,6 +226,7 @@
         </details>
       </div>
     </section>
+    </div>
   </main>
 
   <footer class="page-footer muted">

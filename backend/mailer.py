@@ -188,6 +188,11 @@ class SentStore:
     def total(self) -> int:
         return self.conn.execute("SELECT COUNT(*) FROM sent_emails").fetchone()[0]
 
+    def all(self) -> list[dict]:
+        """Every address ever sent to, oldest first: [{"email", "sent_at"}]."""
+        rows = self.conn.execute("SELECT email, sent_at FROM sent_emails ORDER BY sent_at, email")
+        return [{"email": e, "sent_at": t} for e, t in rows]
+
     def clear(self) -> int:
         n = self.conn.execute("DELETE FROM sent_emails").rowcount
         self.conn.commit()

@@ -1,31 +1,34 @@
 # GitHub Gmail Finder
 
-A web app that searches GitHub users by **name** and **area**. It collects the
-**Gmail** addresses those users have made public on their profiles, together
-with their avatars, and saves them to a database.
+A web app that searches GitHub users by **area**. It collects the **Gmail**
+addresses those users have made public on their profiles, together with their
+avatars, and saves them to a database.
 
-Enter a name and an area, then click **Estimate** to see how many GitHub users
-match and how long fetching will take. Then click **Fetch**. The backend runs
-the same search you would type into GitHub's search box:
+> This is the **`develop`** branch: an area-only version with no Name field and
+> no Estimate step. The `main` branch has the Name + Area + Estimate version.
+
+Enter an area and click **Fetch**. The backend runs the same search you would
+type into GitHub's search box:
 
 ```
-ABC in:name location:XYZ type:user
+location:XYZ type:user
 ```
 
-It then checks **every** matching profile. Progress and results appear in the
-browser while it runs.
+It then checks **every** matching profile. A status line and the results table
+update in the browser while it runs. Click **Stop** at any time; the next
+**Fetch** skips every profile that was already checked and continues with the rest.
 
 ## Features
 
-- Name and Area inputs with **Estimate**, **Fetch** and **Stop** buttons
-- **Estimate first.** Clicking Estimate counts the matching users and estimates how long fetching will take, without fetching any addresses. **Fetch** stays disabled until you estimate, and it locks again if you change Name or Area or when a fetch finishes successfully. After **Stop** or an error you can click Fetch again
+- One **Area** input with **Fetch** and **Stop** buttons
+- **Skips profiles already checked.** Every profile the app opens is remembered (Gmail or not), so a fetch that was stopped resumes where it left off, and a later fetch of any area skips people already checked. **Forget checked history** re-checks everyone on the next fetch; saved addresses are kept
 - **Fetches every result.** GitHub's search returns at most 1,000 users, so larger searches are split by account creation date and combined (see [How "fetch all" works](#how-fetch-all-works))
 - **Waits through rate limits.** If GitHub's limit is reached, the app pauses, shows a countdown, and continues on its own
-- Live progress bar with the number of profiles checked, the number of Gmail addresses found, and the estimated time left
+- One status line with profiles checked, Gmail addresses found, profiles skipped, and the estimated time left
 - Keeps only `@gmail.com` and `@googlemail.com` addresses; all other emails are ignored
 - Results table with each user's **GitHub avatar**, name, profile link, area and Gmail address, **20 rows per page**
 - Export to **CSV**, **TXT** (one address per line) or **XLSX** (Excel)
-- **Send emails** from your own Gmail account to an uploaded list of people who opted in — with a title, content, a time gap between emails, a daily limit, automatic resume, and permanent de-duplication (see [Sending emails](#sending-emails))
+- **Send emails** from your own Gmail account to the stored addresses you tick (only people who opted in) — with a title, content, a time gap between emails, a daily limit, automatic resume, and permanent de-duplication (see [Sending emails](#sending-emails))
 - First-run setup screen for the **GitHub token**, so anyone who clones the project can paste their token in the browser
 - Saves results in SQLite, so they're still there after a restart and repeated searches don't create duplicates
 - Light and dark mode, and works on mobile
@@ -79,17 +82,29 @@ gmail-scrapper/
  ──────────────────                  ──────────────                      ───────────────
  [Token] [Save] ──POST /api/token──▶ validate ─────────────────────────▶ /rate_limit
                                      save to .env
- [Estimate] ──GET /api/estimate──▶ count only ─────────────────────────▶ /search/users (1 request)
- [Name] [Area] [Fetch] ─GET /api/fetch─▶ server.py ──▶ finder.py ──────▶ /search/users?q=...
+ [Area] [Fetch] ──GET /api/fetch──▶ server.py ──▶ finder.py ──────────▶ /search/users?q=...
                                             │              │              (split by created: date
-   progress bar  ◀──── SSE events ──────────┘              │               if > 1000 results)
+   status line   ◀──── SSE events ──────────┘              │               if > 1000 results)
    results table ◀──── GET /api/results ◀── SQLite ◀───────┴───────────▶ /users/{login}
    CSV / TXT / XLSX ◀── GET /api/results.{csv,txt,xlsx}                    (public email, avatar)
 ```
 
 The browser receives progress through **Server-Sent Events** (SSE). The backend
-sends an event after it checks each profile, so the progress bar and the table
+sends an event after it checks each profile, so the status line and the table
 update in real time.
+
+### Skipping profiles that were already checked
+
+Area searches are large (when tested: Shibuya 804 users, Osaka 5,871, Tokyo
+60,340, Japan 105,521), so a fetch may be stopped and resumed many times. The
+database keeps a `checked` table with every GitHub profile the app has opened.
+On each fetch, profiles in that table are skipped without any request to
+GitHub, so resuming costs only the search pages (one request per 100 users).
+A profile is recorded only after it has been fully checked, so stopping never
+loses or double-counts one.
+
+The trade-off: someone who had no Gmail when they were checked, and adds one
+later, is not picked up again until you click **Forget checked history**.
 
 ### How "fetch all" works
 
@@ -113,10 +128,10 @@ Keep the browser tab open; every address found is saved as soon as it's found.
 
 | Method | Path | Description |
 |---|---|---|
-| GET | `/api/status` | Report whether a GitHub token is saved: `{"token": true/false}` |
+| GET | `/api/status` | Whether a GitHub token is saved and how many profiles were already checked: `{"token", "checked"}` |
 | POST | `/api/token` | Check a token with GitHub and save it to `.env`. Body: `{"token": "..."}` |
-| GET | `/api/estimate?name=&location=` | Count matching users and estimate the fetch time, without fetching anything. Returns `{"query", "total", "seconds"}` |
-| GET | `/api/fetch?name=&location=` | Run a search. Streams `start`, `total`, `info`, `wait`, `checked`, `found`, `done` and `fail` events |
+| GET | `/api/fetch?location=` | Run an area search, skipping profiles already checked. Streams `start`, `total`, `info`, `wait`, `skipped`, `checked`, `found`, `done` and `fail` events. (`name=` is still accepted.) |
+| GET | `/api/estimate?name=&location=` | Not used by this branch's page; still available. Counts matching users and estimates the fetch time |
 | POST | `/api/stop` | Stop the running fetch. Body: `{"run": <id from the start event>}` |
 | GET | `/api/results` | List all saved records as JSON |
 | GET | `/api/results.csv` / `.txt` / `.xlsx` | Download all saved records |
@@ -127,11 +142,12 @@ Keep the browser tab open; every address found is saved as soon as it's found.
 | GET | `/api/send/stream?job=` | Run the send. Streams `start`, `sent`, `skipped`, `error`, `limit`, `done`, `fail` events |
 | POST | `/api/send/stop` | Stop the running send. Body: `{job}` |
 | DELETE | `/api/sent` | Reset the "already sent" history |
+| DELETE | `/api/checked` | Forget which GitHub profiles were already checked |
 
 ## Command-line use (optional)
 
 ```bash
-GITHUB_TOKEN=github_pat_... python3 -m backend.finder --name "John" --location "Tokyo"
+GITHUB_TOKEN=github_pat_... python3 -m backend.finder --location "Tokyo"
 ```
 
 ## Tests
@@ -140,9 +156,10 @@ GITHUB_TOKEN=github_pat_... python3 -m backend.finder --name "John" --location "
 python3 -m unittest -v
 ```
 
-There are 64 tests. They cover building the search query, the Gmail filter,
-the estimate and its time calculation, paging, search splitting, waiting
-through rate limits, stopping a fetch, the database upgrade, the three export formats, token
+There are 73 tests. They cover building the search query (including
+area-only), the Gmail filter, the estimate and its time calculation, paging,
+search splitting, waiting through rate limits, stopping a fetch, skipping and
+forgetting already-checked profiles, resuming a stopped fetch, the database upgrade, the three export formats, token
 setup, Gmail credential checks, sending with de-duplication and the daily cap,
 stop/resume, and every API endpoint. A fake GitHub
 client stands in for the real one, so the tests don't use the network.
@@ -166,7 +183,7 @@ never uploaded), so you only do this once until you change accounts.
 
 **Each send:**
 
-1. Upload a **TXT file** of recipient addresses (the project's TXT export has the right format).
+1. In the **Send** tab, tick the people who agreed to hear from you in **Stored Gmail addresses**. Already-sent rows can't be ticked; **Only not sent yet** hides them and **Select all** ticks every address not sent yet.
 2. Enter a **Title** and **Content**.
 3. Set the **Time gap** between emails and the **Daily limit** (default 200, maximum 500).
 4. Optionally tick **Add unsubscribe line** to append a sender identity and opt-out note to each email.
@@ -183,4 +200,4 @@ never uploaded), so you only do this once until you change accounts.
 
 - **Only public emails are collected.** If a user hides their email, the app saves nothing for them. It doesn't try to recover hidden addresses from commits or activity.
 - **GitHub's Acceptable Use Policy** forbids using data taken from GitHub to send unsolicited email or to sell users' personal information.
-- **The results are personal data.** Privacy laws such as Japan's APPI and the EU's GDPR may apply. Keep `data/results.db` and any exported files private, and use **Clear all** when you're finished.
+- **The results are personal data.** Privacy laws such as Japan's APPI and the EU's GDPR may apply. Keep `data/results.db` and any exported files private, and delete `data/results.db` when you're finished.

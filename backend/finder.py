@@ -46,12 +46,19 @@ def _quote(term: str) -> str:
     return f'"{term}"' if any(ch.isspace() for ch in term) else term
 
 
-def build_query(name: str, location: str | None = None) -> str:
-    """Build a GitHub user-search query, e.g. 'ABC in:name location:XYZ type:user'."""
-    if not name or not name.strip():
-        raise ValueError("Please enter a name.")
-    parts = [_quote(name), "in:name"]
-    if location and location.strip():
+def build_query(name: str | None, location: str | None = None) -> str:
+    """
+    Build a GitHub user-search query, e.g. 'ABC in:name location:XYZ type:user',
+    or 'location:XYZ type:user' when only an area is given.
+    """
+    name = (name or "").strip()
+    location = (location or "").strip()
+    if not name and not location:
+        raise ValueError("Please enter an area.")
+    parts = []
+    if name:
+        parts += [_quote(name), "in:name"]
+    if location:
         parts.append(f"location:{_quote(location)}")
     parts.append("type:user")
     return " ".join(parts)
@@ -189,8 +196,12 @@ CREATE TABLE IF NOT EXISTS users (
     query       TEXT,
     fetched_at  TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS checked (
+    login       TEXT PRIMARY KEY,
+    checked_at  TEXT NOT NULL
+);
 """
-COLUMNS = ["login", "name", "location", "email", "profile_url", "avatar_url", "query", "fetched_at"]
+COLUMNS =["login", "name", "location", "email", "profile_url", "avatar_url", "query", "fetched_at"]
 
 
 @dataclass
@@ -210,7 +221,7 @@ class Store:
         if os.path.dirname(path):
             os.makedirs(os.path.dirname(path), exist_ok=True)
         self.conn = sqlite3.connect(path, timeout=10)
-        self.conn.execute(SCHEMA)
+        self.conn.executescript(SCHEMA)
         # Upgrade databases created by older versions of the app.
         existing = {row[1] for row in self.conn.execute("PRAGMA table_info(users)")}
         if "avatar_url" not in existing:
@@ -235,6 +246,25 @@ class Store:
 
     def clear(self) -> int:
         n = self.conn.execute("DELETE FROM users").rowcount
+        self.conn.commit()
+        return n
+
+    # ----- "already checked" history (every profile ever opened, Gmail or not) -----
+    def is_checked(self, login: str) -> bool:
+        return self.conn.execute("SELECT 1 FROM checked WHERE login = ?", (login,)).fetchone() is not None
+
+    def mark_checked(self, login: str) -> None:
+        self.conn.execute(
+            "INSERT OR REPLACE INTO checked (login, checked_at) VALUES (?, ?)",
+            (login, datetime.now(timezone.utc).isoformat(timespec="seconds")),
+        )
+        self.conn.commit()
+
+    def checked_count(self) -> int:
+        return self.conn.execute("SELECT COUNT(*) FROM checked").fetchone()[0]
+
+    def clear_checked(self) -> int:
+        n = self.conn.execute("DELETE FROM checked").rowcount
         self.conn.commit()
         return n
 
@@ -331,18 +361,26 @@ def _iter_slices(client, query: str, start: datetime, end: datetime):
     yield from _iter_slices(client, query, mid + timedelta(seconds=1), end)
 
 
-def iter_fetch(name: str, location: str | None, client, store: Store,
-               max_results: int | None = None, delay: float = 0.0) -> Iterator[dict]:
+SKIP_REPORT_EVERY = 100     # send a "skipped" progress event every N skipped profiles
+
+
+def iter_fetch(name: str | None, location: str | None, client, store: Store,
+               max_results: int | None = None, delay: float = 0.0,
+               skip_checked: bool = False, cancel=None) -> Iterator[dict]:
     """
     Search GitHub and yield progress events (dicts with a "type" key):
       start    {"query"}
       total    {"total"}                       number of users GitHub found
       info     {"message"}
       wait     {"seconds"}                     paused by GitHub's rate limit
-      checked  {"checked", "total", "login", "reason"}   no Gmail on this profile
-      found    {"checked", "total", "record"}            Gmail saved
-      done     {"checked", "found", "query"}
+      skipped  {"skipped", "total"}            already checked before (sent every 100)
+      checked  {"checked", "skipped", "total", "login", "reason"}   no Gmail on this profile
+      found    {"checked", "skipped", "total", "record"}            Gmail saved
+      done     {"checked", "skipped", "found", "query"}
     By default every matching user is checked; max_results limits that.
+    With skip_checked, profiles opened in any earlier fetch are skipped without a
+    request, so a fetch that was stopped continues where it left off.
+    `cancel` (a threading.Event) stops the fetch before the next profile is opened.
     """
     query = build_query(name, location)
     yield {"type": "start", "query": query}
@@ -363,7 +401,7 @@ def iter_fetch(name: str, location: str | None, client, store: Store,
         users = _iter_slices(client, query, GITHUB_EPOCH, datetime.now(timezone.utc).replace(microsecond=0))
 
     seen: set[str] = set()
-    checked = found = 0
+    checked = found = skipped = 0
     for ev in users:
         if ev["type"] != "user":
             yield ev
@@ -374,6 +412,13 @@ def iter_fetch(name: str, location: str | None, client, store: Store,
         if max_results is not None and checked >= total:
             break
         seen.add(login)
+        if skip_checked and store.is_checked(login):
+            skipped += 1
+            if skipped % SKIP_REPORT_EVERY == 0:
+                yield {"type": "skipped", "skipped": skipped, "total": total}
+            continue
+        if cancel is not None and cancel.is_set():
+            break
         checked += 1
 
         profile = yield from _call(client.get_user, login)
@@ -391,16 +436,23 @@ def iter_fetch(name: str, location: str | None, client, store: Store,
                 fetched_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
             )
             store.upsert(rec)
+            store.mark_checked(login)
             found += 1
-            yield {"type": "found", "checked": checked, "total": total, "record": asdict(rec)}
+            yield {"type": "found", "checked": checked, "skipped": skipped, "total": total,
+                   "record": asdict(rec)}
         else:
+            store.mark_checked(login)
             reason = "no public email" if not email else "not a Gmail address"
-            yield {"type": "checked", "checked": checked, "total": total,
+            yield {"type": "checked", "checked": checked, "skipped": skipped, "total": total,
                    "login": login, "reason": reason}
         if delay:
-            time.sleep(delay)
+            if cancel is not None:
+                if cancel.wait(delay):      # wakes up immediately when Stop is pressed
+                    break
+            else:
+                time.sleep(delay)
 
-    yield {"type": "done", "checked": checked, "found": found, "query": query}
+    yield {"type": "done", "checked": checked, "skipped": skipped, "found": found, "query": query}
 
 
 # --------------------------------------------------------------------------
@@ -409,7 +461,7 @@ def iter_fetch(name: str, location: str | None, client, store: Store,
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description="Find public Gmail addresses on GitHub profiles.")
-    p.add_argument("--name", required=True)
+    p.add_argument("--name", help="Optional; search by area alone if omitted")
     p.add_argument("--location")
     p.add_argument("--max-results", type=int, help="Stop after this many profiles (default: all)")
     p.add_argument("--db", default=os.path.join("data", "results.db"))
