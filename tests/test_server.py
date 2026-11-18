@@ -388,3 +388,46 @@ class SendTests(unittest.TestCase):
         with urllib.request.urlopen(req, timeout=5) as r:
             self.assertEqual(json.loads(r.read())["deleted"], 1)
         self.assertEqual(self.get_json("/api/gmail/status")["sent_total"], 0)
+
+    # ---------- block list ----------
+    def delete(self, path):
+        req = urllib.request.Request(self.base + path, method="DELETE")
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return json.loads(r.read())
+
+    def test_block_list_add_list_remove(self):
+        self.assertEqual(self.get_json("/api/blocked"), [])
+        status, data = self.post("/api/blocked", {"emails": "A@Gmail.com, b@example.com\nnope"})
+        self.assertEqual(status, 200, data)
+        self.assertEqual((data["added"], data["already"], data["invalid"]), (2, 0, ["nope"]))
+        self.assertEqual(sorted(r["email"] for r in self.get_json("/api/blocked")),
+                         ["a@gmail.com", "b@example.com"])
+
+        status, data = self.post("/api/blocked", {"emails": "a@gmail.com"})
+        self.assertEqual((data["added"], data["already"]), (0, 1))     # no duplicates
+
+        self.assertEqual(self.delete("/api/blocked?email=A%40gmail.com")["deleted"], 1)
+        self.assertEqual([r["email"] for r in self.get_json("/api/blocked")], ["b@example.com"])
+
+    def test_block_list_rejects_empty_or_invalid(self):
+        self.assertEqual(self.post("/api/blocked", {"emails": "  "})[0], 400)
+        self.assertEqual(self.post("/api/blocked", {"emails": "not-an-email"})[0], 400)
+        self.assertEqual(self.get_json("/api/blocked"), [])
+
+    def test_send_skips_blocked_addresses(self):
+        self.connect_gmail()
+        self.post("/api/blocked", {"emails": "B@gmail.com"})
+        events = self.send(["a@gmail.com", "b@gmail.com", "c@gmail.com"])
+        self.assertEqual(self.sender.sent, ["a@gmail.com", "c@gmail.com"])
+        skip = next(d for t, d in events if t == "skipped")
+        self.assertEqual((skip["email"], skip["reason"]), ("b@gmail.com", "on the block list"))
+        self.assertNotIn("b@gmail.com", [r["email"] for r in self.get_json("/api/sent")])
+
+    def test_unblocked_address_can_be_sent_again(self):
+        self.connect_gmail()
+        self.post("/api/blocked", {"emails": "a@gmail.com"})
+        self.send(["a@gmail.com"])
+        self.assertEqual(self.sender.sent, [])
+        self.delete("/api/blocked?email=a%40gmail.com")
+        self.send(["a@gmail.com"])
+        self.assertEqual(self.sender.sent, ["a@gmail.com"])

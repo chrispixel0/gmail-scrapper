@@ -116,6 +116,47 @@ class IterSendTests(unittest.TestCase):
         self.run_send(recips, second, cancel=threading.Event())
         self.assertEqual(second.sent, ["u2@gmail.com", "u3@gmail.com"])   # resumed, no repeats
 
+    def test_blocked_addresses_are_skipped(self):
+        blocks = mailer.BlockStore(os.path.join(self.tmp.name, "d", "r.db"))
+        try:
+            blocks.add(["B@Gmail.com"])
+            sender = FakeSender()
+            events = list(mailer.iter_send(["a@gmail.com", "b@gmail.com"], "Hi", "Body", gap=0,
+                                           cap=200, add_unsub=False, sender=sender,
+                                           store=self.store, blocklist=blocks))
+            self.assertEqual(sender.sent, ["a@gmail.com"])
+            skip = next(e for e in events if e["type"] == "skipped")
+            self.assertEqual(skip["reason"], "on the block list")
+            self.assertFalse(self.store.already_sent("b@gmail.com"))
+        finally:
+            blocks.close()
+
+
+class BlockStoreTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.blocks = mailer.BlockStore(os.path.join(self.tmp.name, "r.db"))
+
+    def tearDown(self):
+        self.blocks.close()
+        self.tmp.cleanup()
+
+    def test_add_is_case_insensitive_and_deduplicated(self):
+        self.assertEqual(self.blocks.add(["A@gmail.com", "a@gmail.com"]), 1)
+        self.assertTrue(self.blocks.is_blocked("a@GMAIL.com"))
+        self.assertEqual([r["email"] for r in self.blocks.all()], ["a@gmail.com"])
+
+    def test_remove(self):
+        self.blocks.add(["a@gmail.com"])
+        self.assertEqual(self.blocks.remove("A@gmail.com"), 1)
+        self.assertFalse(self.blocks.is_blocked("a@gmail.com"))
+        self.assertEqual(self.blocks.remove("a@gmail.com"), 0)
+
+    def test_split_addresses_reports_invalid(self):
+        valid, invalid = mailer.split_addresses("a@gmail.com; bad, <B@x.io> a@gmail.com")
+        self.assertEqual(valid, ["a@gmail.com", "b@x.io"])
+        self.assertEqual(invalid, ["bad"])
+
 
 if __name__ == "__main__":
     unittest.main()

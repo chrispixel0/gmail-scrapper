@@ -114,7 +114,7 @@
           <button type="button" id="pick-all" class="btn secondary small">Select all</button>
         </div>
       </div>
-      <p class="muted pick-hint">Tick only the people who agreed to receive your email. Ticked addresses are the recipients when you press Send.</p>
+      <p class="muted pick-hint">Tick only the people who agreed to receive your email. Ticked addresses are the recipients when you press Send. Addresses on the block list below can't be ticked.</p>
       <div class="table-wrap">
         <table>
           <thead>
@@ -225,6 +225,22 @@
           <ul id="send-log" class="send-log"></ul>
         </details>
       </div>
+    </section>
+
+    <section class="card" id="block-card">
+      <div class="card-head">
+        <h2>Block list <span id="block-count" class="badge">0</span></h2>
+      </div>
+      <p class="muted pick-hint">Addresses on this list are never emailed, even if they are ticked or stored. Add one or more, separated by commas, spaces or new lines.</p>
+      <form id="block-form" class="block-form" autocomplete="off">
+        <textarea id="block-input" rows="2" placeholder="someone@gmail.com, other@example.com" aria-label="Addresses to block" spellcheck="false"></textarea>
+        <button type="submit" id="block-add" class="btn primary">Add to block list</button>
+      </form>
+      <p id="block-msg" class="block-msg muted" aria-live="polite" hidden></p>
+      <p id="block-error" class="error" role="alert" hidden></p>
+      <input id="block-filter" class="block-filter" type="search" placeholder="Search the block list" aria-label="Search the block list" hidden>
+      <ul id="block-list" class="block-list"></ul>
+      <p id="block-empty" class="empty muted">No blocked addresses yet.</p>
     </section>
     </div>
   </main>

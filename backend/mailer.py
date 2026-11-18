@@ -8,6 +8,8 @@ Design rules baked in for safety:
   ("permanent de-duplication"). This also makes Stop/Send resume for free.
 - A daily cap (default 200, hard maximum 500) is counted across restarts, so
   closing the app cannot reset it.
+- Addresses on the block list (added by hand) are never emailed. The check runs
+  right before each email, so an address blocked mid-run is skipped too.
 
 Uses only the Python standard library (smtplib, email).
 """
@@ -42,15 +44,27 @@ def is_valid_email(addr: str) -> bool:
     return bool(EMAIL_RE.match((addr or "").strip()))
 
 
-def parse_recipients(text: str) -> list[str]:
-    """Pull valid addresses out of an uploaded TXT (one per line, or comma/space separated)."""
-    seen, out = set(), []
+def split_addresses(text: str) -> tuple[list[str], list[str]]:
+    """
+    Split pasted text (one per line, or comma/space/semicolon separated) into
+    (valid lower-cased addresses without duplicates, invalid tokens).
+    """
+    seen, valid, invalid = set(), [], []
     for token in re.split(r"[\s,;]+", text or ""):
         addr = token.strip().strip("<>").lower()
-        if addr and addr not in seen and is_valid_email(addr):
+        if not addr:
+            continue
+        if not is_valid_email(addr):
+            invalid.append(token)
+        elif addr not in seen:
             seen.add(addr)
-            out.append(addr)
-    return out
+            valid.append(addr)
+    return valid, invalid
+
+
+def parse_recipients(text: str) -> list[str]:
+    """Pull valid addresses out of an uploaded TXT (one per line, or comma/space separated)."""
+    return split_addresses(text)[0]
 
 
 def clamp_cap(cap) -> int:
@@ -203,12 +217,66 @@ class SentStore:
 
 
 # --------------------------------------------------------------------------
+# Block list: addresses the user added by hand that must never be emailed
+# --------------------------------------------------------------------------
+
+BLOCK_SCHEMA = """
+CREATE TABLE IF NOT EXISTS blocked_emails (
+    email     TEXT PRIMARY KEY,
+    added_at  TEXT NOT NULL
+);
+"""
+
+
+class BlockStore:
+    def __init__(self, path: str):
+        if os.path.dirname(path):
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+        self.conn = sqlite3.connect(path, timeout=10)
+        self.conn.execute(BLOCK_SCHEMA)
+        self.conn.commit()
+
+    def is_blocked(self, email: str) -> bool:
+        row = self.conn.execute("SELECT 1 FROM blocked_emails WHERE email = ?",
+                                ((email or "").strip().lower(),)).fetchone()
+        return row is not None
+
+    def add(self, emails: list[str], when: str | None = None) -> int:
+        """Block each address (lower-cased); returns how many were newly added."""
+        when = when or datetime.now(timezone.utc).isoformat(timespec="seconds")
+        added = 0
+        for email in emails:
+            cur = self.conn.execute(
+                "INSERT OR IGNORE INTO blocked_emails (email, added_at) VALUES (?, ?)",
+                (email.strip().lower(), when),
+            )
+            added += cur.rowcount
+        self.conn.commit()
+        return added
+
+    def remove(self, email: str) -> int:
+        n = self.conn.execute("DELETE FROM blocked_emails WHERE email = ?",
+                              ((email or "").strip().lower(),)).rowcount
+        self.conn.commit()
+        return n
+
+    def all(self) -> list[dict]:
+        """Every blocked address, most recently added first: [{"email", "added_at"}]."""
+        rows = self.conn.execute(
+            "SELECT email, added_at FROM blocked_emails ORDER BY added_at DESC, email")
+        return [{"email": e, "added_at": t} for e, t in rows]
+
+    def close(self) -> None:
+        self.conn.close()
+
+
+# --------------------------------------------------------------------------
 # Send workflow
 # --------------------------------------------------------------------------
 
 def iter_send(recipients: list[str], subject: str, body: str, gap: float, cap: int,
               add_unsub: bool, sender: GmailSender, store: SentStore,
-              cancel=None) -> Iterator[dict]:
+              cancel=None, blocklist: BlockStore | None = None) -> Iterator[dict]:
     """
     Send to each recipient, yielding progress events (dicts with a "type"):
       start   {"total", "sent_today", "cap", "remaining"}
@@ -218,7 +286,8 @@ def iter_send(recipients: list[str], subject: str, body: str, gap: float, cap: i
       limit   {"cap", "sent_today"}             daily cap reached -> stop
       done    {"sent", "skipped", "failed", "sent_today"}
     Addresses already in the store are skipped (permanent de-duplication), which
-    also makes a second run resume where the first stopped.
+    also makes a second run resume where the first stopped. Addresses on the
+    block list are skipped with the reason "on the block list".
     """
     cap = clamp_cap(cap)
     today = date.today().isoformat()
@@ -237,6 +306,11 @@ def iter_send(recipients: list[str], subject: str, body: str, gap: float, cap: i
             if not is_valid_email(email):
                 skipped += 1
                 yield {"type": "skipped", "email": raw, "reason": "not a valid address",
+                       "skipped": skipped}
+                continue
+            if blocklist is not None and blocklist.is_blocked(email):
+                skipped += 1
+                yield {"type": "skipped", "email": email, "reason": "on the block list",
                        "skipped": skipped}
                 continue
             if store.already_sent(email):

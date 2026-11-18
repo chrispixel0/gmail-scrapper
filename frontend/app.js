@@ -553,6 +553,16 @@ loadResults();
     pickPager: $("pick-pager"),
     pickPagerInfo: $("pick-pager-info"),
     pickPagerButtons: $("pick-pager-buttons"),
+    // block list
+    blockForm: $("block-form"),
+    blockInput: $("block-input"),
+    blockAdd: $("block-add"),
+    blockMsg: $("block-msg"),
+    blockError: $("block-error"),
+    blockFilter: $("block-filter"),
+    blockList: $("block-list"),
+    blockEmpty: $("block-empty"),
+    blockCount: $("block-count"),
   };
 
   const s = {
@@ -567,6 +577,7 @@ loadResults();
   let source = null;
   const sentAt = new Map();   // lower-case email -> when it was sent (from /api/sent)
   const selected = new Set(); // lower-case emails ticked in the stored-address table
+  let blocked = new Map();    // lower-case email -> when it was blocked (from /api/blocked)
   let pickPage = 1;
 
   // ---------- stored-address picker ----------
@@ -579,9 +590,10 @@ loadResults();
     return m.pickUnsent.checked ? rows.filter((r) => !sentAt.has(emailKey(r))) : rows;
   }
 
-  /** Addresses in the current view that can be ticked (not sent yet), de-duplicated. */
+  /** Addresses in the current view that can be ticked (not sent, not blocked), de-duplicated. */
   function selectableKeys() {
-    return [...new Set(pickList().map(emailKey).filter((k) => k && !sentAt.has(k)))];
+    return [...new Set(pickList().map(emailKey)
+      .filter((k) => k && !sentAt.has(k) && !blocked.has(k)))];
   }
 
   /** Everyone the next Send goes to: exactly the ticked rows, in table order. */
@@ -597,14 +609,16 @@ loadResults();
   function pickRowFor(r) {
     const k = emailKey(r);
     const sent = sentAt.has(k);
+    const isBlocked = blocked.has(k);
     const tr = document.createElement("tr");
-    if (sent) tr.className = "is-sent";
+    if (isBlocked) tr.className = "is-blocked";
+    else if (sent) tr.className = "is-sent";
 
     const checkCell = td(undefined, "check-col");
     const cb = document.createElement("input");
     cb.type = "checkbox";
     cb.checked = selected.has(k);
-    cb.disabled = sent || s.busy;
+    cb.disabled = sent || isBlocked || s.busy;
     cb.setAttribute("aria-label", `Select ${r.email}`);
     cb.addEventListener("change", () => {
       if (cb.checked) selected.add(k);
@@ -624,8 +638,9 @@ loadResults();
     avatarCell.appendChild(img);
 
     const profile = safeUrl(r.profile_url, `https://github.com/${encodeURIComponent(r.login)}`);
-    const status = td(sent ? formatSentAt(sentAt.get(k)) : "Not sent",
-                      sent ? "status-cell sent" : "status-cell");
+    const status = isBlocked ? td("Blocked", "status-cell blocked")
+      : td(sent ? formatSentAt(sentAt.get(k)) : "Not sent",
+           sent ? "status-cell sent" : "status-cell");
     tr.append(
       checkCell,
       avatarCell,
@@ -701,6 +716,111 @@ loadResults();
   });
 
   recordListeners.push(renderPick);
+
+  // ---------- block list ----------
+
+  function formatDate(iso) {
+    const d = new Date(iso);
+    return Number.isNaN(d.getTime()) ? "" : `Added ${d.toLocaleDateString()}`;
+  }
+
+  function setBlocked(rows) {
+    blocked = new Map(rows.map((r) => [r.email.toLowerCase(), r.added_at]));
+    blocked.forEach((_, k) => selected.delete(k));   // a blocked address can't stay ticked
+    renderBlocked();
+    renderPick();
+  }
+
+  function blockItem(email, addedAt) {
+    const li = document.createElement("li");
+    const addr = document.createElement("span");
+    addr.className = "block-email";
+    addr.textContent = email;
+    const when = document.createElement("span");
+    when.className = "block-date muted";
+    when.textContent = formatDate(addedAt);
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "btn secondary small";
+    remove.textContent = "Remove";
+    remove.setAttribute("aria-label", `Remove ${email} from the block list`);
+    remove.addEventListener("click", () => unblock(email, remove));
+    li.append(addr, when, remove);
+    return li;
+  }
+
+  function renderBlocked() {
+    const q = m.blockFilter.value.trim().toLowerCase();
+    const items = [...blocked].filter(([k]) => !q || k.includes(q));
+    m.blockList.replaceChildren(...items.map(([k, t]) => blockItem(k, t)));
+    m.blockCount.textContent = blocked.size.toLocaleString();
+    m.blockFilter.hidden = blocked.size < 10 && !q;
+    m.blockEmpty.hidden = items.length > 0;
+    m.blockEmpty.textContent = blocked.size ? "No blocked address matches that search."
+                                            : "No blocked addresses yet.";
+  }
+
+  async function loadBlocked() {
+    try {
+      setBlocked(await (await fetch("/api/blocked")).json());
+    } catch {
+      showError(m.blockError, "Could not load the block list.");
+    }
+  }
+
+  async function unblock(email, button) {
+    button.disabled = true;
+    showError(m.blockError, "");
+    try {
+      const res = await fetch(`/api/blocked?email=${encodeURIComponent(email)}`, { method: "DELETE" });
+      if (!res.ok) throw new Error();
+      m.blockMsg.textContent = `Removed ${email} from the block list.`;
+      m.blockMsg.hidden = false;
+      await loadBlocked();
+    } catch {
+      button.disabled = false;
+      showError(m.blockError, "Could not remove that address. Please try again.");
+    }
+  }
+
+  m.blockForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const text = m.blockInput.value.trim();
+    if (!text) return;
+    m.blockAdd.disabled = true;
+    m.blockMsg.hidden = true;
+    showError(m.blockError, "");
+    try {
+      const res = await fetch("/api/blocked", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ emails: text }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Could not add to the block list.");
+      setBlocked(data.blocked);
+      const parts = [`Blocked ${data.added} address(es).`];
+      if (data.already) parts.push(`${data.already} already on the list.`);
+      if (data.invalid.length) parts.push(`Ignored (not valid): ${data.invalid.join(", ")}`);
+      m.blockMsg.textContent = parts.join(" ");
+      m.blockMsg.hidden = false;
+      m.blockInput.value = "";
+    } catch (err) {
+      showError(m.blockError, err.message || "Could not reach the server.");
+    } finally {
+      m.blockAdd.disabled = false;
+    }
+  });
+
+  // Enter adds; Shift+Enter makes a new line for pasting several addresses.
+  m.blockInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+      e.preventDefault();
+      m.blockForm.requestSubmit();
+    }
+  });
+
+  m.blockFilter.addEventListener("input", renderBlocked);
 
   // ---------- gmail account ----------
 
@@ -934,4 +1054,5 @@ loadResults();
 
   loadGmailStatus();
   loadSent();
+  loadBlocked();
 })();

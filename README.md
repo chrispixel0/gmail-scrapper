@@ -28,7 +28,7 @@ update in the browser while it runs. Click **Stop** at any time; the next
 - Keeps only `@gmail.com` and `@googlemail.com` addresses; all other emails are ignored
 - Results table with each user's **GitHub avatar**, name, profile link, area and Gmail address, **20 rows per page**
 - Export to **CSV**, **TXT** (one address per line) or **XLSX** (Excel)
-- **Send emails** from your own Gmail account to the stored addresses you tick (only people who opted in) — with a title, content, a time gap between emails, a daily limit, automatic resume, and permanent de-duplication (see [Sending emails](#sending-emails))
+- **Send emails** from your own Gmail account to the stored addresses you tick (only people who opted in) — with a title, content, a time gap between emails, a daily limit, automatic resume, and permanent de-duplication, and a **block list** of addresses that are never emailed (see [Sending emails](#sending-emails))
 - First-run setup screen for the **GitHub token**, so anyone who clones the project can paste their token in the browser
 - Saves results in SQLite, so they're still there after a restart and repeated searches don't create duplicates
 - Light and dark mode, and works on mobile
@@ -142,6 +142,9 @@ Keep the browser tab open; every address found is saved as soon as it's found.
 | GET | `/api/send/stream?job=` | Run the send. Streams `start`, `sent`, `skipped`, `error`, `limit`, `done`, `fail` events |
 | POST | `/api/send/stop` | Stop the running send. Body: `{job}` |
 | DELETE | `/api/sent` | Reset the "already sent" history |
+| GET | `/api/blocked` | List the block list: `[{email, added_at}]` |
+| POST | `/api/blocked` | Add to the block list. Body: `{"emails": "a@gmail.com, b@example.com"}` (commas, spaces or new lines) |
+| DELETE | `/api/blocked?email=` | Remove one address from the block list |
 | DELETE | `/api/checked` | Forget which GitHub profiles were already checked |
 
 ## Command-line use (optional)
@@ -156,12 +159,12 @@ GITHUB_TOKEN=github_pat_... python3 -m backend.finder --location "Tokyo"
 python3 -m unittest -v
 ```
 
-There are 73 tests. They cover building the search query (including
+There are 82 tests. They cover building the search query (including
 area-only), the Gmail filter, the estimate and its time calculation, paging,
 search splitting, waiting through rate limits, stopping a fetch, skipping and
 forgetting already-checked profiles, resuming a stopped fetch, the database upgrade, the three export formats, token
 setup, Gmail credential checks, sending with de-duplication and the daily cap,
-stop/resume, and every API endpoint. A fake GitHub
+stop/resume, the block list, and every API endpoint. A fake GitHub
 client stands in for the real one, so the tests don't use the network.
 
 ## Sending emails
@@ -195,6 +198,7 @@ never uploaded), so you only do this once until you change accounts.
 - **Daily limit counted across restarts.** The count is stored per calendar day, so closing the app cannot reset it and let you exceed the limit.
 - **The App Password can send mail as you.** It is kept only on your computer and never committed. Treat it like a password.
 - A per-recipient failure (a bounced or mistyped address) is skipped and logged; it does not stop the batch.
+- **Block list.** In the **Block list** card at the bottom of the Send tab, type or paste addresses (any domain, separated by commas, spaces or new lines) and click **Add to block list**. Blocked addresses show as **Blocked** in the table and can't be ticked. The server also checks the list right before every email, so a blocked address is never sent to, even if it was added while a send is running. Click **Remove** next to an address to unblock it. The list is stored in `data/results.db` and is not affected by **Reset sent history**.
 
 ## Responsible use
 

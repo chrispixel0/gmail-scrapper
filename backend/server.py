@@ -17,6 +17,9 @@ HTTP backend: serves the frontend and a small JSON / Server-Sent Events API.
   GET    /api/sent                  every address already sent to [{email, sent_at}]
   POST   /api/send/stop             {job} -> stop the running send
   DELETE /api/sent                  reset the "already sent" history
+  GET    /api/blocked               block list [{email, added_at}]
+  POST   /api/blocked               {emails: "a@x.com, b@y.com"} -> add to the block list
+  DELETE /api/blocked?email=        remove one address from the block list
   DELETE /api/checked               forget which GitHub profiles were already checked
 """
 
@@ -234,8 +237,38 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(store.all())
             finally:
                 store.close()
+        elif url.path == "/api/blocked":
+            self._json(self._blocked())
         else:
             self._json({"error": "Not found"}, 404)
+
+    # ---------- block list ----------
+    def _blocked(self) -> list[dict]:
+        store = mailer.BlockStore(self.server.db_path)
+        try:
+            return store.all()
+        finally:
+            store.close()
+
+    def _add_blocked(self, body: dict) -> None:
+        raw = body.get("emails", "")
+        if isinstance(raw, list):
+            raw = "\n".join(r for r in raw if isinstance(r, str))
+        if not isinstance(raw, str):
+            return self._json({"error": "Invalid request."}, 400)
+        valid, invalid = mailer.split_addresses(raw)
+        if not valid:
+            msg = ("That doesn't look like a valid email address." if invalid
+                   else "Please enter at least one email address.")
+            return self._json({"error": msg, "invalid": invalid[:20]}, 400)
+        store = mailer.BlockStore(self.server.db_path)
+        try:
+            added = store.add(valid)
+            rows = store.all()
+        finally:
+            store.close()
+        self._json({"added": added, "already": len(valid) - added,
+                    "invalid": invalid[:20], "blocked": rows})
 
     # ---------- gmail status (never returns the password) ----------
     def _gmail_status(self) -> dict:
@@ -280,6 +313,7 @@ class Handler(BaseHTTPRequestHandler):
         "/api/gmail": 8192,
         "/api/send/start": 4_000_000,
         "/api/send/stop": 4096,
+        "/api/blocked": 1_000_000,
     }
 
     def do_POST(self) -> None:
@@ -311,6 +345,8 @@ class Handler(BaseHTTPRequestHandler):
             job = body.get("job")
             self.server.stop_sends(job if isinstance(job, int) else None)
             return self._json({"stopped": True})
+        if path == "/api/blocked":
+            return self._add_blocked(body)
 
         # path == "/api/token"
         token = str(body.get("token", "")).strip()
@@ -349,8 +385,16 @@ class Handler(BaseHTTPRequestHandler):
         self._json({"configured": True, "address": address, "sender_name": sender_name})
 
     def do_DELETE(self) -> None:
-        path = urlparse(self.path).path
-        if path == "/api/results":
+        url = urlparse(self.path)
+        path = url.path
+        if path == "/api/blocked":
+            email = parse_qs(url.query).get("email", [""])[0]
+            store = mailer.BlockStore(self.server.db_path)
+            try:
+                self._json({"deleted": store.remove(email)})
+            finally:
+                store.close()
+        elif path == "/api/results":
             store = finder.Store(self.server.db_path)
             try:
                 self._json({"deleted": store.clear()})
@@ -489,8 +533,10 @@ class Handler(BaseHTTPRequestHandler):
         g = self.server.gmail
         sender = self.server.sender_factory(g["address"], g["app_password"], g.get("sender_name", ""))
         store = mailer.SentStore(self.server.db_path)
+        blocklist = mailer.BlockStore(self.server.db_path)
         try:
-            for ev in mailer.iter_send(sender=sender, store=store, cancel=cancel, **params):
+            for ev in mailer.iter_send(sender=sender, store=store, cancel=cancel,
+                                       blocklist=blocklist, **params):
                 if ev["type"] == "start":
                     ev = {**ev, "job": job_id}
                 emit(ev["type"], ev)
@@ -503,6 +549,7 @@ class Handler(BaseHTTPRequestHandler):
                 pass
         finally:
             store.close()
+            blocklist.close()
             self.server.end_send_job(job_id)
             self.server.send_lock.release()
 
